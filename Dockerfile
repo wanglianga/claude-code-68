@@ -16,7 +16,8 @@ RUN npm ci --omit=dev --no-audit --no-fund
 FROM node:20-slim
 ENV NODE_ENV=production \
     PORT=8080 \
-    DATA_DIR=/app/data
+    DATA_DIR=/app/data \
+    TZ=Asia/Shanghai
 WORKDIR /app
 RUN mkdir -p /app/data && chown -R node:node /app
 COPY --from=serverdeps --chown=node:node /build/server/node_modules ./server/node_modules

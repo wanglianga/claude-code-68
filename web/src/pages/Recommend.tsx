@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api } from '../api';
 import { Card, Chip, Empty, ErrorBox, Loading } from '../components';
-import { ageOf, parseJSON } from '../util';
+import { ageOf, ATTR_KEY_NAMES } from '../util';
 
 export default function Recommend() {
   const [childId, setChildId] = useState<number | ''>('');
@@ -67,7 +67,13 @@ export default function Recommend() {
                 </ul>
               </div>
             ))}
-            <div className="muted small mt8">禁玩项目由家长在会员档案中登记：{parseJSON<string[]>(rec.data.child.banned, []).join('、') || '无'}</div>
+            <div className="muted small mt8">
+              禁玩项目（家长登记）：{rec.data.child.banned.length
+                ? rec.data.child.banned.map((b) => (
+                    <span key={b} className="tag tag-warn">🚫 {ATTR_KEY_NAMES[b] || b}</span>
+                  ))
+                : '无'}
+            </div>
           </Card>
         </div>
       )}

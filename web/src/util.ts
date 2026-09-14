@@ -1,19 +1,32 @@
-// ---------- 时间 ----------
-const pad = (n: number) => String(n).padStart(2, '0');
+// ---------- 时间（全场统一按 Asia/Shanghai 展示，与服务端计算口径一致） ----------
+function partsInCN(iso: string) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(iso));
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return { y: get('year'), m: get('month'), d: get('day'), hh: get('hour'), mm: get('minute') };
+}
 export const fmtDT = (iso?: string | null) => {
   if (!iso) return '—';
-  const d = new Date(iso);
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const p = partsInCN(iso);
+  return `${p.m}-${p.d} ${p.hh}:${p.mm}`;
 };
 export const fmtT = (iso?: string | null) => {
   if (!iso) return '—';
-  const d = new Date(iso);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const p = partsInCN(iso);
+  return `${p.hh}:${p.mm}`;
 };
 export const fmtD = (iso?: string | null) => {
   if (!iso) return '—';
-  const d = new Date(iso);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const p = partsInCN(iso);
+  return `${p.y}-${p.m}-${p.d}`;
+};
+/** datetime-local 输入框默认值（Asia/Shanghai 墙钟时间） */
+export const cnInputValue = (d: Date) => {
+  const p = partsInCN(d.toISOString());
+  return `${p.y}-${p.m}-${p.d}T${p.hh}:${p.mm}`;
 };
 
 export function ageOf(birth: string): string {
@@ -83,3 +96,8 @@ export const TIMELINE_KIND_OPTIONS = Object.entries(KIND_META)
   .map(([value, v]) => ({ value, label: `${v.icon} ${v.label}` }));
 
 export const MEMBER_TYPE: Record<string, string> = { member: '会员卡', punch: '次卡' };
+
+/** 项目 key → 中文名（禁玩项目等场景展示用） */
+export const ATTR_KEY_NAMES: Record<string, string> = {
+  slide: '滑梯', trampoline: '蹦床', climb: '攀爬网', ballpit: '海洋球池',
+};

@@ -3,13 +3,8 @@ import { useState } from 'react';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { Card, Chip, Empty, ErrorBox, Field, Loading, Modal } from '../components';
-import { fmtDT, fmtT } from '../util';
+import { cnInputValue, fmtDT, fmtT } from '../util';
 import type { Party } from '../types';
-
-const toLocalInput = (d: Date) => {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
-};
 
 export default function Parties() {
   const { user } = useAuth();
@@ -24,7 +19,7 @@ export default function Parties() {
   const now = new Date();
   const [form, setForm] = useState({
     type: 'birthday', title: '', area: '',
-    start_at: toLocalInput(now), end_at: toLocalInput(new Date(now.getTime() + 2 * 3600_000)),
+    start_at: cnInputValue(now), end_at: cnInputValue(new Date(now.getTime() + 2 * 3600_000)),
     leader_id: '',
   });
   const [childId, setChildId] = useState('');

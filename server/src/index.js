@@ -12,6 +12,24 @@ const PORT = Number(process.env.PORT || 8080);
 const nowIso = () => new Date().toISOString();
 const parse = (s, fb) => { try { return JSON.parse(s); } catch { return fb; } };
 
+// ---------- 时间口径：全场统一按 Asia/Shanghai（UTC+8，无夏令时）展示与计算 ----------
+const CN_OFFSET_MS = 8 * 3600 * 1000;
+const cnDay = (d = new Date()) => new Date(d.getTime() + CN_OFFSET_MS).toISOString().slice(0, 10);
+const cnTodayRange = () => {
+  const day = cnDay();
+  return [new Date(`${day}T00:00:00+08:00`).toISOString(), new Date(`${day}T23:59:59.999+08:00`).toISOString()];
+};
+const fmtHM = (iso) => new Date(new Date(iso).getTime() + CN_OFFSET_MS).toISOString().slice(11, 16);
+const cnHour = (iso) => Number(new Date(new Date(iso).getTime() + CN_OFFSET_MS).toISOString().slice(11, 13));
+// 前端 datetime-local / date 等不带时区的输入一律按 Asia/Shanghai 解析
+function parseCNDateTime(s, endOfDay = false) {
+  if (!s) return null;
+  const str = String(s);
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(str)) return new Date(str).toISOString();
+  const suffix = str.length === 10 ? (endOfDay ? 'T23:59:59.999' : 'T00:00:00') : '';
+  return new Date(`${str}${suffix}+08:00`).toISOString();
+}
+
 // ---------------- 认证 ----------------
 const tokens = new Map(); // token -> userId
 const pubUser = (u) => ({ id: u.id, username: u.username, name: u.name, role: u.role });
@@ -36,15 +54,6 @@ const dailyLimit = () => Number(db.prepare("SELECT value FROM settings WHERE key
 const occupancy = () => {
   const rows = db.prepare('SELECT zone, COUNT(*) c FROM wristband_locations GROUP BY zone').all();
   return Object.fromEntries(rows.map((r) => [r.zone, r.c]));
-};
-function todayRange() {
-  const s = new Date(); s.setHours(0, 0, 0, 0);
-  const e = new Date(); e.setHours(23, 59, 59, 999);
-  return [s.toISOString(), e.toISOString()];
-}
-const fmtHM = (iso) => {
-  const d = new Date(iso);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
 function addTimeline(eventId, kind, user, content, meta = {}) {
@@ -81,7 +90,7 @@ app.get('/api/staff', auth, (req, res) =>
 app.get('/api/overview', auth, (req, res) => {
   const attractions = db.prepare('SELECT * FROM attractions ORDER BY id').all();
   const occ = occupancy();
-  const [ds, de] = todayRange();
+  const [ds, de] = cnTodayRange();
   const parties = db.prepare(`SELECT * FROM parties WHERE start_at BETWEEN ? AND ? ORDER BY start_at`).all(ds, de)
     .map(withPartyChildren);
   const events = db.prepare(`SELECT status, COUNT(*) c FROM events WHERE status IN ('open','processing') GROUP BY status`).all();
@@ -254,7 +263,7 @@ app.get('/api/recommendations/:childId', auth, (req, res) => {
   const banned = parse(child.banned, []);
   const attrs = db.prepare('SELECT * FROM attractions WHERE is_facility=0 ORDER BY id').all();
   const occ = occupancy();
-  const [ds, de] = todayRange();
+  const [ds, de] = cnTodayRange();
   const parties = db.prepare('SELECT * FROM parties WHERE start_at BETWEEN ? AND ?').all(ds, de);
   const statusText = { open: '开放', closed: '已关闭', maintenance: '维护中', emergency_stop: '急停中' };
 
@@ -323,7 +332,7 @@ app.post('/api/events', auth, (req, res) => {
   if (!title) return res.status(400).json({ error: '事件标题必填' });
   const child = child_id ? getChild(child_id) : null;
   const member_id = child ? child.member_id : (req.body.member_id || null);
-  const dstr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const dstr = cnDay().replace(/-/g, '');
   const seq = db.prepare("SELECT COUNT(*) c FROM events WHERE code LIKE ?").get(`EV-${dstr}-%`).c + 1;
   const code = `EV-${dstr}-${String(seq).padStart(4, '0')}`;
   const info = db.prepare(`INSERT INTO events (code, type, title, description, child_id, member_id, attraction_id, severity, status, created_by_id, created_by_name, created_at)
@@ -393,29 +402,79 @@ app.post('/api/events/:id/status', auth, (req, res) => {
   res.json({ ok: true });
 });
 
+// 归档资料适用规则：1=适用（必须提供资料或明确结论），0=不适用（留空时自动生成结论）
+const ARCHIVE_RULES = {
+  fall:            { photos: 1, cctv: 1, parent_signature: 1, compensation: 1, recheck: 0, benefit_adjustment: 0 },
+  push:            { photos: 1, cctv: 1, parent_signature: 1, compensation: 0, recheck: 0, benefit_adjustment: 0 },
+  equipment_stop:  { photos: 1, cctv: 1, parent_signature: 0, compensation: 0, recheck: 1, benefit_adjustment: 1 },
+  lost_child:      { photos: 0, cctv: 1, parent_signature: 1, compensation: 0, recheck: 0, benefit_adjustment: 0 },
+  card_dispute:    { photos: 0, cctv: 0, parent_signature: 1, compensation: 1, recheck: 0, benefit_adjustment: 1 },
+  refund:          { photos: 0, cctv: 0, parent_signature: 1, compensation: 1, recheck: 0, benefit_adjustment: 1 },
+};
+const MATERIAL_LABELS = {
+  photos: '现场照片', cctv: '监控时间段', parent_signature: '家长签字',
+  compensation: '赔付方案', recheck: '设备复检', benefit_adjustment: '会员权益调整',
+};
+const sectionEmpty = (key, val) => {
+  if (val == null) return true;
+  if (key === 'photos' || key === 'cctv') return !Array.isArray(val) || val.length === 0;
+  if (key === 'recheck') return !(val.result && String(val.result).trim());
+  if (key === 'benefit_adjustment') return !(Number(val.add_sessions) > 0 || (val.note && String(val.note).trim()));
+  return !String(val).trim();
+};
+
 app.post('/api/events/:id/archive', auth, requireRole('manager'), (req, res) => {
   const e = db.prepare('SELECT * FROM events WHERE id=?').get(req.params.id);
   if (!e) return res.status(404).json({ error: '事件不存在' });
   if (e.status === 'archived') return res.status(400).json({ error: '事件已归档' });
-  const {
-    photos = [], cctv = [], parent_signature = '', compensation = '',
-    recheck = null, benefit_adjustment = null,
-  } = req.body || {};
+  if (e.status !== 'resolved') {
+    const label = { open: '待处理', processing: '处理中' }[e.status] || e.status;
+    return res.status(400).json({ error: `仅「已解决」状态的事件可归档（当前：${label}），请先完成处置并标记解决` });
+  }
+  const body = req.body || {};
+  const conclusionsIn = body.conclusions || {};
+  const rules = ARCHIVE_RULES[e.type] || {};
+  const typeLabel = EVENT_TYPES[e.type] || e.type;
+
+  const materials = {
+    photos: (Array.isArray(body.photos) ? body.photos : []).map((s) => String(s).trim()).filter(Boolean),
+    cctv: (Array.isArray(body.cctv) ? body.cctv : []).filter((c) => c && (c.camera || c.start || c.end || c.note)),
+    parent_signature: String(body.parent_signature || '').trim(),
+    compensation: String(body.compensation || '').trim(),
+    recheck: body.recheck && String(body.recheck.result || '').trim()
+      ? { result: String(body.recheck.result).trim(), inspector: String(body.recheck.inspector || '').trim() } : null,
+    benefit_adjustment: body.benefit_adjustment && (Number(body.benefit_adjustment.add_sessions) > 0 || String(body.benefit_adjustment.note || '').trim())
+      ? { add_sessions: Number(body.benefit_adjustment.add_sessions) || 0, note: String(body.benefit_adjustment.note || '').trim() } : null,
+  };
+
+  // 校验：适用项必须有资料或明确结论；不适用项留空时自动生成结论
+  const missing = [];
+  const conclusions = {};
+  for (const key of Object.keys(MATERIAL_LABELS)) {
+    if (!sectionEmpty(key, materials[key])) continue;
+    const c = String(conclusionsIn[key] || '').trim();
+    if (c) { conclusions[key] = c; continue; }
+    if (rules[key]) missing.push(MATERIAL_LABELS[key]);
+    else conclusions[key] = `本事件类型（${typeLabel}）不适用，无需提供`;
+  }
+  if (missing.length) {
+    return res.status(400).json({
+      error: `归档资料不完整：${missing.join('、')} 缺失。请补充资料，或为其填写明确结论（如"无需提供，原因…"）`,
+      missing,
+    });
+  }
 
   const tx = db.transaction(() => {
     let applied = null;
-    if (benefit_adjustment && Number(benefit_adjustment.add_sessions) > 0 && e.member_id) {
-      const n = Number(benefit_adjustment.add_sessions);
+    if (materials.benefit_adjustment && materials.benefit_adjustment.add_sessions > 0 && e.member_id) {
+      const n = materials.benefit_adjustment.add_sessions;
       db.prepare('UPDATE members SET remaining_sessions = remaining_sessions + ? WHERE id=?').run(n, e.member_id);
-      applied = { add_sessions: n, applied_to: getMember(e.member_id).card_no, note: benefit_adjustment.note || '' };
+      applied = { add_sessions: n, applied_to: getMember(e.member_id).card_no, note: materials.benefit_adjustment.note };
     }
     const archive = {
-      photos: photos.filter(Boolean),
-      cctv: cctv.filter((c) => c && (c.camera || c.start || c.end)),
-      parent_signature,
-      compensation,
-      recheck,
-      benefit_adjustment: applied || benefit_adjustment || null,
+      ...materials,
+      benefit_adjustment: applied || materials.benefit_adjustment,
+      conclusions,
       archived_by: req.user.name,
       archived_at: nowIso(),
     };
@@ -423,12 +482,14 @@ app.post('/api/events/:id/archive', auth, requireRole('manager'), (req, res) => 
       .run(JSON.stringify(archive), nowIso(), e.id);
     if (archive.photos.length) addTimeline(e.id, 'photo', req.user, `现场照片归档 ${archive.photos.length} 张：${archive.photos.join('、')}`, { photos: archive.photos });
     for (const c of archive.cctv) addTimeline(e.id, 'cctv', req.user, `监控时间段归档：摄像头 ${c.camera || '-'} ${c.start || ''}–${c.end || ''}${c.note ? `（${c.note}）` : ''}`, c);
-    if (parent_signature) addTimeline(e.id, 'signature', req.user, `家长签字确认：${parent_signature}`);
-    if (compensation) addTimeline(e.id, 'compensation', req.user, `赔付方案：${compensation}`);
-    if (recheck && recheck.result) addTimeline(e.id, 'recheck', req.user, `设备复检：${recheck.result}（复检人：${recheck.inspector || '-'}）`, recheck);
+    if (archive.parent_signature) addTimeline(e.id, 'signature', req.user, `家长签字确认：${archive.parent_signature}`);
+    if (archive.compensation) addTimeline(e.id, 'compensation', req.user, `赔付方案：${archive.compensation}`);
+    if (archive.recheck) addTimeline(e.id, 'recheck', req.user, `设备复检：${archive.recheck.result}（复检人：${archive.recheck.inspector || '-'}）`, archive.recheck);
     if (archive.benefit_adjustment) addTimeline(e.id, 'benefit', req.user,
       `会员权益调整：${archive.benefit_adjustment.applied_to ? `会员卡 ${archive.benefit_adjustment.applied_to} 补偿 ${archive.benefit_adjustment.add_sessions} 次；` : ''}${archive.benefit_adjustment.note || ''}`,
       archive.benefit_adjustment);
+    const conclEntries = Object.entries(conclusions);
+    if (conclEntries.length) addTimeline(e.id, 'note', req.user, `归档结论：${conclEntries.map(([k, v]) => `${MATERIAL_LABELS[k]}—${v}`).join('；')}`, conclusions);
     addTimeline(e.id, 'status', req.user, '事件归档完成，进入安全档案');
   });
   tx();
@@ -444,8 +505,8 @@ app.get('/api/review', auth, requireRole('manager'), (req, res) => {
              LEFT JOIN children ch ON ch.id=e.child_id`;
   const args = [];
   const cond = [];
-  if (from) { const d = new Date(`${from}T00:00:00`); cond.push('e.created_at >= ?'); args.push(d.toISOString()); }
-  if (to) { const d = new Date(`${to}T23:59:59`); cond.push('e.created_at <= ?'); args.push(d.toISOString()); }
+  if (from) { cond.push('e.created_at >= ?'); args.push(parseCNDateTime(from)); }
+  if (to) { cond.push('e.created_at <= ?'); args.push(parseCNDateTime(to, true)); }
   if (attraction_id) { cond.push('e.attraction_id = ?'); args.push(Number(attraction_id)); }
   if (staff) {
     sql += ` JOIN event_timeline t ON t.event_id = e.id`;
@@ -460,7 +521,7 @@ app.get('/api/review', auth, requireRole('manager'), (req, res) => {
   for (const e of events) {
     byType[e.type] = (byType[e.type] || 0) + 1;
     byAttraction[e.attraction_name || '未关联项目'] = (byAttraction[e.attraction_name || '未关联项目'] || 0) + 1;
-    const h = `${new Date(e.created_at).getHours()}时`;
+    const h = `${cnHour(e.created_at)}时`;
     byHour[h] = (byHour[h] || 0) + 1;
     bySeverity[e.severity] = (bySeverity[e.severity] || 0) + 1;
   }
@@ -484,9 +545,12 @@ app.post('/api/parties', auth, requireRole('frontdesk', 'manager', 'activity'), 
   if (!['birthday', 'daycare'].includes(type)) return res.status(400).json({ error: '活动类型须为生日会或托管班' });
   if (!title || !start_at || !end_at) return res.status(400).json({ error: '标题与起止时间必填' });
   const leader = leader_id ? db.prepare('SELECT * FROM users WHERE id=?').get(leader_id) : req.user;
+  const startIso = parseCNDateTime(start_at);
+  const endIso = parseCNDateTime(end_at);
+  if (!startIso || !endIso) return res.status(400).json({ error: '起止时间格式不正确' });
   const info = db.prepare(`INSERT INTO parties (type, title, leader_id, leader_name, area, start_at, end_at, status)
                            VALUES (?,?,?,?,?,?,?,'scheduled')`)
-    .run(type, title, leader.id, leader.name, area, new Date(start_at).toISOString(), new Date(end_at).toISOString());
+    .run(type, title, leader.id, leader.name, area, startIso, endIso);
   res.json({ ok: true, id: info.lastInsertRowid });
 });
 

@@ -74,7 +74,7 @@ export interface Overview {
 }
 
 export interface RecommendResult {
-  child: Child;
+  child: Omit<Child, 'banned'> & { banned: string[] };
   eligible: { attraction: Attraction; occupancy: number; ratio: number; reasons: string[]; parties: string[] }[];
   blocked: { attraction: Attraction; reasons: string[] }[];
 }
@@ -91,6 +91,8 @@ export interface ArchiveData {
   parent_signature: string; compensation: string;
   recheck: { result?: string; inspector?: string } | null;
   benefit_adjustment: { add_sessions?: number; applied_to?: string; note?: string } | null;
+  /** 留空资料的明确结论（不适用项自动生成或人工填写） */
+  conclusions?: Record<string, string>;
   archived_by?: string; archived_at?: string;
 }
 

@@ -138,11 +138,12 @@ CREATE TABLE IF NOT EXISTS settings (
 `);
 
 const nowIso = () => new Date().toISOString();
+// 种子数据的时间统一按 Asia/Shanghai（UTC+8）墙钟时间生成，与运行时展示口径一致
+const CN_OFFSET_MS = 8 * 3600 * 1000;
 function at(dayOffset, h, m = 0) {
-  const d = new Date();
-  d.setDate(d.getDate() + dayOffset);
-  d.setHours(h, m, 0, 0);
-  return d.toISOString();
+  const day = new Date(Date.now() + dayOffset * 86400000 + CN_OFFSET_MS).toISOString().slice(0, 10);
+  const p = (n) => String(n).padStart(2, '0');
+  return new Date(`${day}T${p(h)}:${p(m)}:00+08:00`).toISOString();
 }
 function minutesAgo(min) {
   return new Date(Date.now() - min * 60000).toISOString();
@@ -260,7 +261,7 @@ export function seedIfEmpty() {
                                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     const insTL = db.prepare(`INSERT INTO event_timeline (event_id, kind, actor_id, actor_name, actor_role, content, meta, created_at)
                               VALUES (?,?,?,?,?,?,?,?)`);
-    const dstr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const dstr = new Date(Date.now() + CN_OFFSET_MS).toISOString().slice(0, 10).replace(/-/g, '');
 
     // EV1 处理中：张小雨海洋球池摔倒
     const ev1 = insEvent.run(`EV-${dstr}-0001`, 'fall', '张小雨在海洋球池摔倒，右膝擦伤',

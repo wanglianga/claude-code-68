@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api } from '../api';
 import { Card, Chip, Empty, ErrorBox, Loading } from '../components';
-import { ageOf, fmtD, MEMBER_TYPE, parseJSON } from '../util';
+import { ageOf, ATTR_KEY_NAMES, fmtD, MEMBER_TYPE, parseJSON } from '../util';
 import type { Member } from '../types';
 
 export default function Members() {
@@ -78,7 +78,7 @@ export default function Members() {
                     ? <span className="tag tag-bad">⚠ {c.allergies}</span> : '无'}</dd>
                   <dt>禁玩项目</dt>
                   <dd>{parseJSON<string[]>(c.banned, []).length
-                    ? parseJSON<string[]>(c.banned, []).map((b) => <span key={b} className="tag tag-warn">🚫 {{ slide: '滑梯', trampoline: '蹦床', climb: '攀爬网', ballpit: '海洋球池' }[b as string] || b}</span>)
+                    ? parseJSON<string[]>(c.banned, []).map((b) => <span key={b} className="tag tag-warn">🚫 {ATTR_KEY_NAMES[b] || b}</span>)
                     : '无'}</dd>
                   {c.notes && <><dt>备注</dt><dd>{c.notes}</dd></>}
                 </dl>

@@ -5,10 +5,28 @@ import { api } from '../api';
 import { useAuth } from '../auth';
 import { Card, Chip, Empty, ErrorBox, Field, Loading, Modal } from '../components';
 import {
-  ageOf, EVENT_STATUS, EVENT_TYPES, fmtDT, fmtT, KIND_META, MEMBER_TYPE,
+  ageOf, ATTR_KEY_NAMES, EVENT_STATUS, EVENT_TYPES, fmtDT, fmtT, KIND_META, MEMBER_TYPE,
   parseJSON, ROLE_NAMES, SEVERITY, TIMELINE_KIND_OPTIONS,
 } from '../util';
 import type { ArchiveData } from '../types';
+
+function ConclusionTag({ text }: { text?: string }) {
+  return text ? <span className="tag tag-warn">结论：{text}</span> : <span className="muted">—</span>;
+}
+
+/** 各事件类型适用的归档资料（与服务端 ARCHIVE_RULES 一致） */
+const ARCHIVE_APPLICABLE: Record<string, string[]> = {
+  fall: ['photos', 'cctv', 'parent_signature', 'compensation'],
+  push: ['photos', 'cctv', 'parent_signature'],
+  equipment_stop: ['photos', 'cctv', 'recheck', 'benefit_adjustment'],
+  lost_child: ['cctv', 'parent_signature'],
+  card_dispute: ['parent_signature', 'compensation', 'benefit_adjustment'],
+  refund: ['parent_signature', 'compensation', 'benefit_adjustment'],
+};
+const MATERIAL_LABELS: Record<string, string> = {
+  photos: '现场照片', cctv: '监控时间段', parent_signature: '家长签字',
+  compensation: '赔付方案', recheck: '设备复检', benefit_adjustment: '会员权益调整',
+};
 
 export default function EventDetail() {
   const { id } = useParams();
@@ -79,7 +97,11 @@ export default function EventDetail() {
               <button className="btn" disabled={setStatus.isPending} onClick={() => setStatus.mutate('resolved')}>标记解决</button>
             )}
             {event.status !== 'archived' && user?.role === 'manager' && (
-              <button className="btn btn-primary" onClick={() => setShowArchive(true)}>归档（档案+权益调整）</button>
+              event.status === 'resolved' ? (
+                <button className="btn btn-primary" onClick={() => setShowArchive(true)}>归档（档案+权益调整）</button>
+              ) : (
+                <span className="muted small">事件「已解决」后方可归档</span>
+              )
             )}
           </div>
         </div>
@@ -141,19 +163,25 @@ export default function EventDetail() {
             <Card className="mt16" title="安全档案（照片 · 监控 · 签字 · 赔付 · 复检 · 权益调整）">
               <dl className="kv">
                 <dt>现场照片</dt>
-                <dd>{archive.photos.length ? archive.photos.map((p, i) => <span key={i} className="tag">📷 {p}</span>) : '—'}</dd>
+                <dd>{archive.photos.length
+                  ? archive.photos.map((p, i) => <span key={i} className="tag">📷 {p}</span>)
+                  : <ConclusionTag text={archive.conclusions?.photos} />}</dd>
                 <dt>监控时间段</dt>
                 <dd>{archive.cctv.length
                   ? archive.cctv.map((c, i) => <span key={i} className="tag">🎥 {c.camera} {c.start}–{c.end}{c.note ? `（${c.note}）` : ''}</span>)
-                  : '—'}</dd>
-                <dt>家长签字</dt><dd>{archive.parent_signature || '—'}</dd>
-                <dt>赔付方案</dt><dd>{archive.compensation || '—'}</dd>
+                  : <ConclusionTag text={archive.conclusions?.cctv} />}</dd>
+                <dt>家长签字</dt>
+                <dd>{archive.parent_signature || <ConclusionTag text={archive.conclusions?.parent_signature} />}</dd>
+                <dt>赔付方案</dt>
+                <dd>{archive.compensation || <ConclusionTag text={archive.conclusions?.compensation} />}</dd>
                 <dt>设备复检</dt>
-                <dd>{archive.recheck?.result ? `${archive.recheck.result}（复检人：${archive.recheck.inspector || '—'}）` : '—'}</dd>
+                <dd>{archive.recheck?.result
+                  ? `${archive.recheck.result}（复检人：${archive.recheck.inspector || '—'}）`
+                  : <ConclusionTag text={archive.conclusions?.recheck} />}</dd>
                 <dt>权益调整</dt>
                 <dd>{archive.benefit_adjustment
                   ? `会员卡 ${archive.benefit_adjustment.applied_to || '—'} 补偿 ${archive.benefit_adjustment.add_sessions || 0} 次${archive.benefit_adjustment.note ? `；${archive.benefit_adjustment.note}` : ''}`
-                  : '—'}</dd>
+                  : <ConclusionTag text={archive.conclusions?.benefit_adjustment} />}</dd>
                 <dt>归档人</dt><dd>{archive.archived_by} · {fmtDT(archive.archived_at)}</dd>
               </dl>
             </Card>
@@ -171,7 +199,7 @@ export default function EventDetail() {
                 <div className="mt8">
                   {child.allergies && child.allergies !== '无' && <span className="tag tag-bad">⚠ 过敏：{child.allergies}</span>}
                   {parseJSON<string[]>(child.banned, []).map((b) => (
-                    <span key={b} className="tag tag-warn">🚫 禁玩：{{ slide: '滑梯', trampoline: '蹦床', climb: '攀爬网', ballpit: '海洋球池' }[b] || b}</span>
+                    <span key={b} className="tag tag-warn">🚫 禁玩：{ATTR_KEY_NAMES[b] || b}</span>
                   ))}
                 </div>
                 {member && (
@@ -235,14 +263,16 @@ export default function EventDetail() {
       </div>
 
       {showArchive && (
-        <ArchiveModal eventId={eventId} onClose={() => setShowArchive(false)}
+        <ArchiveModal eventId={eventId} eventType={event.type} onClose={() => setShowArchive(false)}
           onDone={() => { setShowArchive(false); invalidate(); }} />
       )}
     </div>
   );
 }
 
-function ArchiveModal({ eventId, onClose, onDone }: { eventId: number; onClose: () => void; onDone: () => void }) {
+function ArchiveModal({ eventId, eventType, onClose, onDone }: {
+  eventId: number; eventType: string; onClose: () => void; onDone: () => void;
+}) {
   const [photos, setPhotos] = useState('');
   const [cctv, setCctv] = useState([{ camera: '', start: '', end: '', note: '' }]);
   const [signature, setSignature] = useState('');
@@ -251,6 +281,10 @@ function ArchiveModal({ eventId, onClose, onDone }: { eventId: number; onClose: 
   const [recheckInspector, setRecheckInspector] = useState('');
   const [addSessions, setAddSessions] = useState('');
   const [benefitNote, setBenefitNote] = useState('');
+  const [conclusions, setConclusions] = useState<Record<string, string>>({});
+
+  const applicable = ARCHIVE_APPLICABLE[eventType] || [];
+  const typeLabel = EVENT_TYPES[eventType] || eventType;
 
   const archive = useMutation({
     mutationFn: () => api.archiveEvent(eventId, {
@@ -260,14 +294,23 @@ function ArchiveModal({ eventId, onClose, onDone }: { eventId: number; onClose: 
       compensation,
       recheck: recheckResult ? { result: recheckResult, inspector: recheckInspector } : null,
       benefit_adjustment: addSessions ? { add_sessions: Number(addSessions), note: benefitNote } : null,
+      conclusions: Object.fromEntries(Object.entries(conclusions).filter(([, v]) => v.trim())),
     }),
     onSuccess: onDone,
   });
 
+  const req = (key: string) => applicable.includes(key)
+    ? <span style={{ color: 'var(--bad)' }}> *</span>
+    : <span className="muted">（不适用）</span>;
+
   return (
     <Modal title="事件归档：现场照片 / 监控 / 签字 / 赔付 / 复检 / 权益调整" onClose={onClose} wide>
+      <div className="ok-box" style={{ background: 'var(--info-bg)', color: 'var(--info)' }}>
+        事件类型「{typeLabel}」适用资料（标 * 项）：{applicable.map((k) => MATERIAL_LABELS[k]).join('、') || '无'}。
+        适用项必须提供资料或填写明确结论；不适用项留空将自动生成结论。
+      </div>
       <div className="grid grid-2">
-        <Field label="现场照片（每行一个文件名/链接）">
+        <Field label={`现场照片（每行一个文件名/链接）`}>
           <textarea value={photos} onChange={(e) => setPhotos(e.target.value)} placeholder={'滑梯入口特写.jpg\n警示牌照片.jpg'} />
         </Field>
         <Field label="家长签字确认">
@@ -312,10 +355,21 @@ function ArchiveModal({ eventId, onClose, onDone }: { eventId: number; onClose: 
             onChange={(e) => setBenefitNote(e.target.value)} />
         </div>
       </Field>
+      <Field label="明确结论（留空的适用资料必须填写；不适用项可留空自动生成）">
+        <div className="grid grid-2">
+          {Object.entries(MATERIAL_LABELS).map(([key, label]) => (
+            <div key={key} className="row" style={{ gap: 6 }}>
+              <span className="small" style={{ width: 96, flexShrink: 0 }}>{label}{req(key)}</span>
+              <input placeholder="如：无需提供，原因…" value={conclusions[key] || ''}
+                onChange={(e) => setConclusions({ ...conclusions, [key]: e.target.value })} />
+            </div>
+          ))}
+        </div>
+      </Field>
       <ErrorBox error={archive.error} />
       <button className="btn btn-primary" style={{ width: '100%' }} disabled={archive.isPending}
         onClick={() => archive.mutate()}>
-        确认归档（写入安全档案并调整会员权益）
+        确认归档（校验资料完整性后写入安全档案）
       </button>
     </Modal>
   );
