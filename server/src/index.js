@@ -447,19 +447,21 @@ app.post('/api/events/:id/archive', auth, requireRole('manager'), (req, res) => 
       ? { add_sessions: Number(body.benefit_adjustment.add_sessions) || 0, note: String(body.benefit_adjustment.note || '').trim() } : null,
   };
 
-  // 校验：适用项必须有资料或明确结论；不适用项留空时自动生成结论
+  // 校验：适用项必须提供真实资料（不接受任何结论替代）；仅不适用项允许保存明确结论
   const missing = [];
   const conclusions = {};
   for (const key of Object.keys(MATERIAL_LABELS)) {
-    if (!sectionEmpty(key, materials[key])) continue;
-    const c = String(conclusionsIn[key] || '').trim();
-    if (c) { conclusions[key] = c; continue; }
-    if (rules[key]) missing.push(MATERIAL_LABELS[key]);
-    else conclusions[key] = `本事件类型（${typeLabel}）不适用，无需提供`;
+    if (!sectionEmpty(key, materials[key])) continue; // 已提供真实资料
+    if (rules[key]) {
+      missing.push(MATERIAL_LABELS[key]); // 适用项缺失：结论不能替代
+    } else {
+      const c = String(conclusionsIn[key] || '').trim();
+      conclusions[key] = c || `本事件类型（${typeLabel}）不适用，无需提供`;
+    }
   }
   if (missing.length) {
     return res.status(400).json({
-      error: `归档资料不完整：${missing.join('、')} 缺失。请补充资料，或为其填写明确结论（如"无需提供，原因…"）`,
+      error: `归档资料不完整：${missing.join('、')} 缺失。适用资料必须提供真实材料，不能用结论替代`,
       missing,
     });
   }

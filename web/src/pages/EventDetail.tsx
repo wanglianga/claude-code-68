@@ -285,6 +285,7 @@ function ArchiveModal({ eventId, eventType, onClose, onDone }: {
 
   const applicable = ARCHIVE_APPLICABLE[eventType] || [];
   const typeLabel = EVENT_TYPES[eventType] || eventType;
+  const mark = (key: string) => (applicable.includes(key) ? ' *' : '（不适用）');
 
   const archive = useMutation({
     mutationFn: () => api.archiveEvent(eventId, {
@@ -307,18 +308,18 @@ function ArchiveModal({ eventId, eventType, onClose, onDone }: {
     <Modal title="事件归档：现场照片 / 监控 / 签字 / 赔付 / 复检 / 权益调整" onClose={onClose} wide>
       <div className="ok-box" style={{ background: 'var(--info-bg)', color: 'var(--info)' }}>
         事件类型「{typeLabel}」适用资料（标 * 项）：{applicable.map((k) => MATERIAL_LABELS[k]).join('、') || '无'}。
-        适用项必须提供资料或填写明确结论；不适用项留空将自动生成结论。
+        适用项必须提供真实资料，不能用结论替代；不适用项可填写明确结论，留空自动生成。
       </div>
       <div className="grid grid-2">
-        <Field label={`现场照片（每行一个文件名/链接）`}>
+        <Field label={`现场照片（每行一个文件名/链接）${mark('photos')}`}>
           <textarea value={photos} onChange={(e) => setPhotos(e.target.value)} placeholder={'滑梯入口特写.jpg\n警示牌照片.jpg'} />
         </Field>
-        <Field label="家长签字确认">
+        <Field label={`家长签字确认${mark('parent_signature')}`}>
           <textarea value={signature} onChange={(e) => setSignature(e.target.value)}
             placeholder="如：母亲张莉已现场确认伤情与处理结果并签字" />
         </Field>
       </div>
-      <Field label="监控时间段">
+      <Field label={`监控时间段${mark('cctv')}`}>
         {cctv.map((c, i) => (
           <div className="row mb8" key={i}>
             <input style={{ width: 110 }} placeholder="摄像头 C-07" value={c.camera}
@@ -336,18 +337,18 @@ function ArchiveModal({ eventId, eventType, onClose, onDone }: {
         ))}
       </Field>
       <div className="grid grid-2">
-        <Field label="赔付方案">
+        <Field label={`赔付方案${mark('compensation')}`}>
           <textarea value={compensation} onChange={(e) => setCompensation(e.target.value)}
             placeholder="如：承担医药费 200 元；赠送次卡 1 次" />
         </Field>
-        <Field label="设备复检">
+        <Field label={`设备复检${mark('recheck')}`}>
           <textarea value={recheckResult} onChange={(e) => setRecheckResult(e.target.value)}
             placeholder="如：更换弹簧 2 根，满载测试合格" />
           <input className="mt8" placeholder="复检人" value={recheckInspector}
             onChange={(e) => setRecheckInspector(e.target.value)} />
         </Field>
       </div>
-      <Field label="会员权益调整（补偿次数将直接写入会员卡）">
+      <Field label={`会员权益调整（补偿次数将直接写入会员卡）${mark('benefit_adjustment')}`}>
         <div className="row">
           <input style={{ width: 140 }} type="number" min="0" placeholder="补偿次数" value={addSessions}
             onChange={(e) => setAddSessions(e.target.value)} />
@@ -355,15 +356,20 @@ function ArchiveModal({ eventId, eventType, onClose, onDone }: {
             onChange={(e) => setBenefitNote(e.target.value)} />
         </div>
       </Field>
-      <Field label="明确结论（留空的适用资料必须填写；不适用项可留空自动生成）">
+      <Field label="不适用项明确结论（仅不适用项可填；适用项必须提供真实资料）">
         <div className="grid grid-2">
-          {Object.entries(MATERIAL_LABELS).map(([key, label]) => (
-            <div key={key} className="row" style={{ gap: 6 }}>
-              <span className="small" style={{ width: 96, flexShrink: 0 }}>{label}{req(key)}</span>
-              <input placeholder="如：无需提供，原因…" value={conclusions[key] || ''}
-                onChange={(e) => setConclusions({ ...conclusions, [key]: e.target.value })} />
-            </div>
-          ))}
+          {Object.entries(MATERIAL_LABELS)
+            .filter(([key]) => !applicable.includes(key))
+            .map(([key, label]) => (
+              <div key={key} className="row" style={{ gap: 6 }}>
+                <span className="small" style={{ width: 96, flexShrink: 0 }}>{label}（不适用）</span>
+                <input placeholder="如：无需提供，原因…" value={conclusions[key] || ''}
+                  onChange={(e) => setConclusions({ ...conclusions, [key]: e.target.value })} />
+              </div>
+            ))}
+          {applicable.length === Object.keys(MATERIAL_LABELS).length && (
+            <span className="muted small">本事件类型无不适用项</span>
+          )}
         </div>
       </Field>
       <ErrorBox error={archive.error} />
