@@ -135,6 +135,31 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS search_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL REFERENCES events(id),
+  child_id INTEGER NOT NULL REFERENCES children(id),
+  wristband_no TEXT,           -- 手环编号（未入园为 NULL）
+  last_zone TEXT NOT NULL,     -- 最后入场项目/最后定位
+  cameras TEXT NOT NULL,       -- 监控点位 JSON 数组
+  assignments TEXT NOT NULL,   -- 巡场分派 JSON：[{staff,last_area,zone}]
+  status TEXT NOT NULL DEFAULT 'searching',  -- searching | found | superseded
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS found_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL REFERENCES events(id),
+  found_zone TEXT NOT NULL,              -- 发现地点
+  companion TEXT NOT NULL,               -- 陪同人（发现时在孩子身边/发现人）
+  child_state TEXT NOT NULL,             -- 孩子状态
+  need_comfort INTEGER NOT NULL DEFAULT 0,   -- 是否需要安抚
+  taken_by_other INTEGER NOT NULL DEFAULT 0, -- 曾被其他家长带离项目区
+  other_guardian_name TEXT,              -- 对方监护人
+  other_guardian_phone TEXT,
+  recorded_by_id INTEGER,
+  recorded_by_name TEXT,
+  created_at TEXT NOT NULL
+);
 `);
 
 const nowIso = () => new Date().toISOString();
@@ -149,6 +174,55 @@ function minutesAgo(min) {
   return new Date(Date.now() - min * 60000).toISOString();
 }
 
+// ---------- 走失查找：监控点位与查找任务生成 ----------
+export const CAMERA_MAP = {
+  '滑梯': ['C-01', 'C-02'],
+  '蹦床': ['C-03', 'C-04'],
+  '攀爬网': ['C-05', 'C-06'],
+  '海洋球池': ['C-07', 'C-08'],
+  '入口': ['C-09'],
+  '出口': ['C-10'],
+  '休息区': ['C-11'],
+  '卫生间': ['C-12'],
+  '医疗点': ['C-13'],
+};
+
+/**
+ * 根据最后入场项目、手环编号、监控点位和巡场人员位置生成查找任务。
+ * 旧的查找中任务标记为 superseded，返回新任务。
+ */
+export function generateSearchTask(event, fallbackZone = null) {
+  const ci = event.child_id
+    ? db.prepare("SELECT * FROM checkins WHERE child_id=? AND status='inside'").get(event.child_id)
+    : null;
+  const wristband_no = ci ? ci.wristband_no : null;
+  const loc = wristband_no
+    ? db.prepare('SELECT * FROM wristband_locations WHERE wristband_no=?').get(wristband_no)
+    : null;
+  const last_zone = (loc && loc.zone) || fallbackZone || '入口';
+  const cameras = [...(CAMERA_MAP[last_zone] || []), ...CAMERA_MAP['出口']];
+
+  const patrols = db.prepare("SELECT * FROM users WHERE role='patrol' ORDER BY id").all();
+  const lastAreaStmt = db.prepare('SELECT area FROM patrol_logs WHERE staff_id=? ORDER BY created_at DESC, id DESC LIMIT 1');
+  const attractions = db.prepare('SELECT name FROM attractions WHERE is_facility=0 ORDER BY id').all().map((r) => r.name);
+  // 搜索优先级：最后位置 → 出口/入口 → 休息区 → 其余项目
+  const zones = [last_zone, '出口', '入口', '休息区', ...attractions.filter((a) => a !== last_zone)];
+  const assignments = patrols.map((p, i) => ({
+    staff: p.name,
+    last_area: (lastAreaStmt.get(p.id) || {}).area || '暂无巡场记录',
+    zone: zones[i % zones.length],
+  }));
+
+  db.prepare("UPDATE search_tasks SET status='superseded' WHERE event_id=? AND status='searching'").run(event.id);
+  const info = db.prepare(`INSERT INTO search_tasks (event_id, child_id, wristband_no, last_zone, cameras, assignments, status, created_at)
+                           VALUES (?,?,?,?,?,?,'searching',?)`)
+    .run(event.id, event.child_id, wristband_no, last_zone, JSON.stringify(cameras), JSON.stringify(assignments), nowIso());
+  return { id: info.lastInsertRowid, wristband_no, last_zone, cameras, assignments };
+}
+
+export const searchTaskSummary = (t) =>
+  `最后位置 ${t.last_zone}；手环 ${t.wristband_no || '无（未入园）'}；监控点位 ${t.cameras.join('、')}；巡场分派 ${t.assignments.map((a) => `${a.staff}→${a.zone}`).join('，')}`;
+
 export function seedIfEmpty() {
   const c = db.prepare('SELECT COUNT(*) AS c FROM users').get().c;
   if (c > 0) return;
@@ -161,6 +235,7 @@ export function seedIfEmpty() {
     const mg = insUser.run('manager', 'mg123456', '赵敏', 'manager').lastInsertRowid;
     const md = insUser.run('medical', 'md123456', '陈曦', 'medical').lastInsertRowid;
     const ac = insUser.run('activity', 'ac123456', '周婷', 'activity').lastInsertRowid;
+    insUser.run('security', 'sc123456', '郑安', 'security'); // 门口安保
 
     db.prepare('INSERT INTO settings (key, value) VALUES (?,?)').run('daily_limit', '60');
 
@@ -309,6 +384,10 @@ export function seedIfEmpty() {
       JSON.stringify({ wristband_no: null, zone: '休息区' }), minutesAgo(5));
     insTL.run(ev3, 'communication', fd, '王芳', 'frontdesk', '前台已广播寻人，并电话同步母亲孙倩；已通知各出口留意',
       JSON.stringify({ to: '孙倩', channel: '广播+电话' }), minutesAgo(3));
+    // 走失查找任务（种子）：孙果果未核验入园，无手环，最后目击休息区
+    const task3 = generateSearchTask({ id: ev3, child_id: cGuo }, '休息区');
+    insTL.run(ev3, 'search', ac, '周婷', 'activity', `已生成查找任务：${searchTaskSummary(task3)}`,
+      JSON.stringify({ task_id: task3.id }), minutesAgo(2));
   });
   tx();
   console.log('[seed] 演示数据已初始化');

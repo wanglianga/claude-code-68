@@ -45,7 +45,7 @@ export const parseJSON = <T,>(s: string | null | undefined, fb: T): T => {
 
 // ---------- 文案映射 ----------
 export const ROLE_NAMES: Record<string, string> = {
-  frontdesk: '前台', patrol: '巡场', manager: '店长', medical: '医疗点', activity: '活动专员', system: '系统',
+  frontdesk: '前台', patrol: '巡场', manager: '店长', medical: '医疗点', activity: '活动专员', security: '门口安保', system: '系统',
 };
 
 export const EVENT_TYPES: Record<string, string> = {
@@ -88,6 +88,8 @@ export const KIND_META: Record<string, { label: string; icon: string; tone: stri
   signature: { label: '家长签字', icon: '✍️', tone: 'ok' },
   recheck: { label: '设备复检', icon: '🔧', tone: 'ok' },
   benefit: { label: '权益调整', icon: '💳', tone: 'warn' },
+  search: { label: '查找任务', icon: '🔍', tone: 'bad' },
+  found: { label: '发现孩子', icon: '🎯', tone: 'ok' },
   note: { label: '备注', icon: '📝', tone: 'info' },
 };
 

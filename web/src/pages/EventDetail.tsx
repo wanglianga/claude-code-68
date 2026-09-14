@@ -43,6 +43,16 @@ export default function EventDetail() {
   const [meta, setMeta] = useState<Record<string, string>>({});
   const [showArchive, setShowArchive] = useState(false);
 
+  // 走失查找：发现登记
+  const attrs = useQuery({ queryKey: ['attractions'], queryFn: api.attractions });
+  const [foundZone, setFoundZone] = useState('');
+  const [companion, setCompanion] = useState('');
+  const [childState, setChildState] = useState('情绪平稳');
+  const [needComfort, setNeedComfort] = useState(false);
+  const [takenByOther, setTakenByOther] = useState(false);
+  const [otherName, setOtherName] = useState('');
+  const [otherPhone, setOtherPhone] = useState('');
+
   const invalidate = () => qc.invalidateQueries({ queryKey: ['event', eventId] });
 
   const addEntry = useMutation({
@@ -53,12 +63,28 @@ export default function EventDetail() {
     mutationFn: (status: string) => api.setEventStatus(eventId, status),
     onSuccess: invalidate,
   });
+  const genTask = useMutation({
+    mutationFn: () => api.regenSearchTask(eventId),
+    onSuccess: invalidate,
+  });
+  const reportFound = useMutation({
+    mutationFn: () => api.reportFound(eventId, {
+      found_zone: foundZone, companion, child_state: childState,
+      need_comfort: needComfort, taken_by_other: takenByOther,
+      other_guardian_name: otherName, other_guardian_phone: otherPhone,
+    }),
+    onSuccess: invalidate,
+  });
 
   if (isLoading) return <Loading />;
   if (error || !data) return <ErrorBox error={error} />;
-  const { event, timeline, child, member, guardians, parties } = data;
+  const { event, timeline, child, member, guardians, parties, search_task, found_report } = data;
   const archive = parseJSON<ArchiveData | null>(event.archive, null);
   const st = EVENT_STATUS[event.status];
+  const isLost = event.type === 'lost_child';
+  const canOperate = !!user && ['patrol', 'manager'].includes(user.role);
+  const needFoundReport = isLost && !found_report; // 走失事件须先登记发现信息才能关闭
+  const zones = [...(attrs.data?.attractions.map((a) => a.name) || []), '医疗点', '入口', '出口'];
 
   const metaFields: Record<string, { key: string; label: string; ph?: string }[]> = {
     wristband: [{ key: 'wristband_no', label: '手环号', ph: 'WB-101' }, { key: 'zone', label: '定位区域', ph: '医疗点 / 滑梯…' }],
@@ -94,7 +120,9 @@ export default function EventDetail() {
               <button className="btn" disabled={setStatus.isPending} onClick={() => setStatus.mutate('processing')}>开始处置</button>
             )}
             {(event.status === 'open' || event.status === 'processing') && user && ['manager', 'medical'].includes(user.role) && (
-              <button className="btn" disabled={setStatus.isPending} onClick={() => setStatus.mutate('resolved')}>标记解决</button>
+              needFoundReport
+                ? <span className="muted small">登记发现信息后方可关闭</span>
+                : <button className="btn" disabled={setStatus.isPending} onClick={() => setStatus.mutate('resolved')}>标记解决</button>
             )}
             {event.status !== 'archived' && user?.role === 'manager' && (
               event.status === 'resolved' ? (
@@ -107,6 +135,126 @@ export default function EventDetail() {
         </div>
         <ErrorBox error={setStatus.error} />
       </Card>
+
+      {isLost && (
+        <div className="grid grid-2 mt16">
+          <Card title="查找任务（最后入场项目 · 手环 · 监控点位 · 巡场分派）"
+            extra={search_task && (
+              <Chip tone={search_task.status === 'found' ? 'ok' : 'bad'}>
+                {search_task.status === 'found' ? '已找到' : '查找中 · 出园已冻结'}
+              </Chip>
+            )}>
+            {!search_task ? <Empty text="尚未生成查找任务" /> : (() => {
+              const cams = parseJSON<string[]>(search_task.cameras, []);
+              const asg = parseJSON<{ staff: string; last_area: string; zone: string }[]>(search_task.assignments, []);
+              return (
+                <>
+                  <dl className="kv">
+                    <dt>手环编号</dt><dd>{search_task.wristband_no || '无（未核验入园）'}</dd>
+                    <dt>最后位置</dt><dd><b>{search_task.last_zone}</b></dd>
+                    <dt>监控点位</dt>
+                    <dd>{cams.map((c) => <span key={c} className="tag">🎥 {c}</span>)}</dd>
+                  </dl>
+                  <table className="table mt8">
+                    <thead><tr><th>巡场人员</th><th>最近巡场位置</th><th>负责搜索区域</th></tr></thead>
+                    <tbody>
+                      {asg.map((a, i) => (
+                        <tr key={i}><td>{a.staff}</td><td>{a.last_area}</td><td><b>{a.zone}</b></td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              );
+            })()}
+            {search_task?.status !== 'found' && event.status !== 'archived' && user && ['patrol', 'manager', 'frontdesk'].includes(user.role) && (
+              <button className="btn btn-sm mt8" disabled={genTask.isPending} onClick={() => genTask.mutate()}>
+                ↻ 按最新信息重新生成查找任务
+              </button>
+            )}
+            <ErrorBox error={genTask.error} />
+          </Card>
+
+          {found_report ? (
+            <Card title="发现孩子登记" extra={<Chip tone="ok">已登记</Chip>}>
+              <dl className="kv">
+                <dt>发现地点</dt><dd><b>{found_report.found_zone}</b></dd>
+                <dt>陪同人</dt><dd>{found_report.companion}</dd>
+                <dt>孩子状态</dt><dd>{found_report.child_state}</dd>
+                <dt>需要安抚</dt><dd>{found_report.need_comfort ? '是' : '否'}</dd>
+                {!!found_report.taken_by_other && (
+                  <>
+                    <dt>曾被带离</dt>
+                    <dd>
+                      <span className="tag tag-warn">曾被其他家长带离项目区</span>
+                      对方监护人：{found_report.other_guardian_name}（{found_report.other_guardian_phone || '电话未留'}）
+                      <div className="muted small mt8">已下发巡场提醒：出口岗核对陪同授权后再放行</div>
+                    </dd>
+                  </>
+                )}
+                <dt>登记人</dt><dd>{found_report.recorded_by_name} · {fmtDT(found_report.created_at)}</dd>
+              </dl>
+            </Card>
+          ) : (
+            <Card title="发现孩子登记" extra={<Chip tone="warn">登记后事件方可关闭</Chip>}>
+              {!canOperate ? (
+                <Empty text="由巡场或店长登记发现信息" />
+              ) : (
+                <>
+                  <div className="grid grid-2">
+                    <Field label="发现地点 *">
+                      <select value={foundZone} onChange={(e) => setFoundZone(e.target.value)}>
+                        <option value="">请选择…</option>
+                        {zones.map((z) => <option key={z} value={z}>{z}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="陪同人 *">
+                      <input value={companion} onChange={(e) => setCompanion(e.target.value)}
+                        placeholder="发现时在孩子身边的人，如：巡场 李强" />
+                    </Field>
+                  </div>
+                  <div className="grid grid-2">
+                    <Field label="孩子状态 *">
+                      <select value={childState} onChange={(e) => setChildState(e.target.value)}>
+                        {['情绪平稳', '受惊哭闹', '轻微擦伤', '需医疗检查'].map((s) => <option key={s}>{s}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="是否需要安抚">
+                      <label className="row small" style={{ gap: 6, marginTop: 10 }}>
+                        <input type="checkbox" style={{ width: 'auto' }} checked={needComfort}
+                          onChange={(e) => setNeedComfort(e.target.checked)} />
+                        需要安抚（通知家长到医疗点/休息区）
+                      </label>
+                    </Field>
+                  </div>
+                  <Field label="是否曾被其他家长带离项目区">
+                    <label className="row small" style={{ gap: 6 }}>
+                      <input type="checkbox" style={{ width: 'auto' }} checked={takenByOther}
+                        onChange={(e) => setTakenByOther(e.target.checked)} />
+                      是，曾被其他家长带离（须记录对方监护人并提醒巡场）
+                    </label>
+                  </Field>
+                  {takenByOther && (
+                    <div className="grid grid-2">
+                      <Field label="对方监护人姓名 *">
+                        <input value={otherName} onChange={(e) => setOtherName(e.target.value)} placeholder="如：王某" />
+                      </Field>
+                      <Field label="对方监护人电话">
+                        <input value={otherPhone} onChange={(e) => setOtherPhone(e.target.value)} placeholder="138…" />
+                      </Field>
+                    </div>
+                  )}
+                  <ErrorBox error={reportFound.error} />
+                  <button className="btn btn-primary" style={{ width: '100%' }}
+                    disabled={!foundZone || !companion.trim() || reportFound.isPending}
+                    onClick={() => reportFound.mutate()}>
+                    确认发现孩子并登记
+                  </button>
+                </>
+              )}
+            </Card>
+          )}
+        </div>
+      )}
 
       <div className="detail-layout">
         <div>

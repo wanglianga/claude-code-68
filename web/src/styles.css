@@ -218,6 +218,17 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .bar-fill { height: 100%; background: linear-gradient(90deg, #ffb37a, var(--brand)); }
 .bar-num { width: 28px; font-weight: 700; }
 
+/* ---------- 走失寻人风险提示 ---------- */
+.alert-banner {
+  display: flex; gap: 10px; align-items: flex-start;
+  background: linear-gradient(90deg, #d94343, #c23333);
+  color: #fff; border-radius: 12px; padding: 12px 16px; margin-bottom: 16px;
+  font-size: 13.5px; box-shadow: 0 4px 18px rgba(217, 67, 67, .35);
+}
+.alert-icon { font-size: 20px; }
+.alert-banner a { color: #ffe08a; font-weight: 700; }
+.alert-item { margin-left: 6px; }
+
 @media (max-width: 1100px) {
   .grid-4, .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .attr-grid, .patrol-grid, .grid-3 { grid-template-columns: repeat(2, 1fr); }

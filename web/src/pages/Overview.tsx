@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { api } from '../api';
 import { Card, Chip, Empty, ErrorBox, Loading } from '../components';
+import SearchAlert from '../components/SearchAlert';
 import { ATTR_STATUS, fmtDT, fmtT } from '../util';
 
 export default function Overview() {
@@ -23,6 +24,7 @@ export default function Overview() {
 
   return (
     <div>
+      <SearchAlert />
       <div className="stat-grid">
         <div className="stat">
           <div className="stat-label">在场人数 / 当日限流</div>
@@ -84,7 +86,10 @@ export default function Overview() {
                   <tr key={c.id}>
                     <td><b>{c.child_name}</b></td>
                     <td><Chip tone="info">{c.wristband_no}</Chip></td>
-                    <td>{c.zone || '—'}</td>
+                    <td>
+                      {c.zone || '—'}
+                      {!!c.lost_frozen && <Chip tone="bad">🚫 出园冻结</Chip>}
+                    </td>
                     <td>{c.guardian_name}<div className="muted small">{c.guardian_phone}</div></td>
                     <td>{fmtT(c.checkin_at)}</td>
                   </tr>

@@ -1,7 +1,7 @@
 import express from 'express';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { db, seedIfEmpty } from './db.js';
+import { db, seedIfEmpty, generateSearchTask, searchTaskSummary } from './db.js';
 
 seedIfEmpty();
 
@@ -64,7 +64,14 @@ function addTimeline(eventId, kind, user, content, meta = {}) {
 }
 
 const EVENT_TYPES = { fall: '儿童摔倒', push: '被推搡冲突', equipment_stop: '设备临停', lost_child: '走失寻人', card_dispute: '会员卡争议', refund: '退课/退费申请' };
-const TIMELINE_KINDS = ['status', 'communication', 'wristband', 'cctv', 'firstaid', 'disinfection', 'compensation', 'handover', 'photo', 'signature', 'recheck', 'benefit', 'note'];
+const TIMELINE_KINDS = ['status', 'communication', 'wristband', 'cctv', 'firstaid', 'disinfection', 'compensation', 'handover', 'photo', 'signature', 'recheck', 'benefit', 'note', 'search', 'found'];
+
+// 进行中走失寻人事件：child_id → 事件编号（用于出园冻结与风险提示）
+const lostChildMap = () => {
+  const rows = db.prepare(`SELECT child_id, code FROM events
+    WHERE type='lost_child' AND status IN ('open','processing') AND child_id IS NOT NULL`).all();
+  return new Map(rows.map((r) => [r.child_id, r.code]));
+};
 
 // ---------------- 健康检查 / 认证 ----------------
 app.get('/api/health', (req, res) => res.json({ ok: true, ts: nowIso() }));
@@ -100,7 +107,8 @@ app.get('/api/overview', auth, (req, res) => {
     JOIN children ch ON ch.id = ci.child_id
     JOIN guardians g ON g.id = ci.guardian_id
     LEFT JOIN wristband_locations wl ON wl.wristband_no = ci.wristband_no
-    WHERE ci.status='inside' ORDER BY ci.checkin_at DESC`).all();
+    WHERE ci.status='inside' ORDER BY ci.checkin_at DESC`).all()
+    .map((c) => ({ ...c, lost_frozen: lostChildMap().has(c.child_id) ? 1 : 0, lost_event_code: lostChildMap().get(c.child_id) || null }));
   const patrol = db.prepare('SELECT * FROM patrol_logs ORDER BY created_at DESC LIMIT 6').all();
   res.json({
     inside_count: insideCount(),
@@ -182,6 +190,7 @@ app.post('/api/wristbands/scan', auth, (req, res) => {
 
 // ---------------- 入园核验 ----------------
 app.get('/api/checkins/active', auth, (req, res) => {
+  const lost = lostChildMap();
   res.json({
     inside_count: insideCount(),
     daily_limit: dailyLimit(),
@@ -193,8 +202,23 @@ app.get('/api/checkins/active', auth, (req, res) => {
       JOIN guardians g ON g.id=ci.guardian_id
       JOIN members m ON m.id=ci.member_id
       LEFT JOIN wristband_locations wl ON wl.wristband_no=ci.wristband_no
-      WHERE ci.status='inside' ORDER BY ci.checkin_at DESC`).all(),
+      WHERE ci.status='inside' ORDER BY ci.checkin_at DESC`).all()
+      .map((c) => ({ ...c, lost_frozen: lost.has(c.child_id) ? 1 : 0, lost_event_code: lost.get(c.child_id) || null })),
   });
+});
+
+// 走失寻人风险提示（前台与门口安保等同一看板）
+app.get('/api/alerts/active', auth, (req, res) => {
+  res.json(db.prepare(`
+    SELECT e.id AS event_id, e.code, e.status, e.created_at,
+           ch.id AS child_id, ch.name AS child_name,
+           ci.wristband_no, wl.zone AS last_zone
+    FROM events e
+    JOIN children ch ON ch.id = e.child_id
+    LEFT JOIN checkins ci ON ci.child_id = ch.id AND ci.status = 'inside'
+    LEFT JOIN wristband_locations wl ON wl.wristband_no = ci.wristband_no
+    WHERE e.type = 'lost_child' AND e.status IN ('open','processing')
+    ORDER BY e.created_at DESC`).all());
 });
 
 app.get('/api/wristbands/next', auth, (req, res) => {
@@ -251,6 +275,11 @@ app.post('/api/checkins', auth, requireRole('frontdesk', 'manager'), (req, res) 
 app.post('/api/checkins/:id/checkout', auth, requireRole('frontdesk', 'manager'), (req, res) => {
   const ci = db.prepare("SELECT * FROM checkins WHERE id=? AND status='inside'").get(req.params.id);
   if (!ci) return res.status(404).json({ error: '在场记录不存在' });
+  // 走失查找期间自动冻结该儿童手环的出园操作
+  const lost = lostChildMap().get(ci.child_id);
+  if (lost) {
+    return res.status(423).json({ error: `走失寻人进行中（${lost}），该儿童手环出园已冻结，待事件关闭后放行` });
+  }
   db.prepare("UPDATE checkins SET status='left', checkout_at=? WHERE id=?").run(nowIso(), ci.id);
   db.prepare('DELETE FROM wristband_locations WHERE wristband_no=?').run(ci.wristband_no);
   res.json({ ok: true });
@@ -348,6 +377,12 @@ app.post('/api/events', auth, (req, res) => {
         { wristband_no: ci.wristband_no, zone: loc ? loc.zone : null });
     }
   }
+  // 走失寻人：自动生成查找任务并冻结该儿童手环出园
+  if (type === 'lost_child' && child) {
+    const task = generateSearchTask({ id, child_id: child.id });
+    addTimeline(id, 'search', req.user, `已生成查找任务：${searchTaskSummary(task)}`, { task_id: task.id });
+    addTimeline(id, 'status', null, `该儿童手环出园操作已自动冻结，待事件关闭后放行`);
+  }
   res.json({ ok: true, id, code });
 });
 
@@ -367,7 +402,68 @@ app.get('/api/events/:id', auth, (req, res) => {
   } else if (e.member_id) {
     member = getMember(e.member_id);
   }
-  res.json({ event: e, timeline, child, member, guardians, parties });
+  let search_task = null, found_report = null;
+  if (e.type === 'lost_child') {
+    search_task = db.prepare('SELECT * FROM search_tasks WHERE event_id=? ORDER BY id DESC LIMIT 1').get(e.id) || null;
+    found_report = db.prepare('SELECT * FROM found_reports WHERE event_id=? ORDER BY id DESC LIMIT 1').get(e.id) || null;
+  }
+  res.json({ event: e, timeline, child, member, guardians, parties, search_task, found_report });
+});
+
+// 走失查找任务：按最新信息重新生成
+app.post('/api/events/:id/search-task', auth, requireRole('patrol', 'manager', 'frontdesk'), (req, res) => {
+  const e = db.prepare('SELECT * FROM events WHERE id=?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: '事件不存在' });
+  if (e.type !== 'lost_child') return res.status(400).json({ error: '仅走失寻人事件可生成查找任务' });
+  if (['resolved', 'archived'].includes(e.status)) return res.status(400).json({ error: '事件已关闭，无需再查找' });
+  const task = generateSearchTask(e);
+  addTimeline(e.id, 'search', req.user, `重新生成查找任务：${searchTaskSummary(task)}`, { task_id: task.id });
+  res.json({ ok: true, task });
+});
+
+// 发现孩子登记：记录后事件才能关闭
+app.post('/api/events/:id/found', auth, requireRole('patrol', 'manager'), (req, res) => {
+  const e = db.prepare('SELECT * FROM events WHERE id=?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: '事件不存在' });
+  if (e.type !== 'lost_child') return res.status(400).json({ error: '仅走失寻人事件可登记发现信息' });
+  if (['resolved', 'archived'].includes(e.status)) return res.status(400).json({ error: '事件已关闭' });
+  const {
+    found_zone, companion, child_state,
+    need_comfort = false, taken_by_other = false,
+    other_guardian_name = '', other_guardian_phone = '',
+  } = req.body || {};
+  if (!found_zone || !companion || !child_state)
+    return res.status(400).json({ error: '发现地点、陪同人、孩子状态均为必填' });
+  if (taken_by_other && !String(other_guardian_name).trim())
+    return res.status(400).json({ error: '孩子曾被其他家长带离项目区时，必须记录对方监护人' });
+
+  const tx = db.transaction(() => {
+    db.prepare(`INSERT INTO found_reports (event_id, found_zone, companion, child_state, need_comfort, taken_by_other,
+                                           other_guardian_name, other_guardian_phone, recorded_by_id, recorded_by_name, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(e.id, found_zone, companion, child_state, need_comfort ? 1 : 0, taken_by_other ? 1 : 0,
+        taken_by_other ? other_guardian_name : null, taken_by_other ? other_guardian_phone : null,
+        req.user.id, req.user.name, nowIso());
+    db.prepare("UPDATE search_tasks SET status='found' WHERE event_id=? AND status='searching'").run(e.id);
+    addTimeline(e.id, 'found', req.user,
+      `发现孩子：地点 ${found_zone}；陪同人 ${companion}；孩子状态 ${child_state}；${need_comfort ? '需要安抚' : '无需安抚'}`,
+      { found_zone, companion, child_state, need_comfort: !!need_comfort });
+    if (taken_by_other) {
+      addTimeline(e.id, 'note', req.user,
+        `孩子曾被其他家长带离项目区：对方监护人 ${other_guardian_name}（${other_guardian_phone || '电话未留'}），已下发巡场提醒`,
+        { other_guardian_name, other_guardian_phone });
+      db.prepare('INSERT INTO patrol_logs (area, status, note, staff_id, staff_name, created_at) VALUES (?,?,?,?,?,?)')
+        .run('出口', '需关注',
+          `走失事件 ${e.code}：孩子曾被其他家长带离项目区，对方监护人 ${other_guardian_name}（${other_guardian_phone || '-'}），请各出口岗核对陪同授权后再放行`,
+          req.user.id, req.user.name, nowIso());
+    }
+    if (e.status === 'open') {
+      db.prepare("UPDATE events SET status='processing' WHERE id=?").run(e.id);
+      addTimeline(e.id, 'status', null, '孩子已找到，事件转为处理中，待确认后关闭');
+    }
+  });
+  tx();
+  res.json({ ok: true });
 });
 
 app.post('/api/events/:id/timeline', auth, (req, res) => {
@@ -396,6 +492,11 @@ app.post('/api/events/:id/status', auth, (req, res) => {
   if (status === 'resolved' && !['manager', 'medical'].includes(req.user.role))
     return res.status(403).json({ error: '仅店长或医疗点可标记解决' });
   if (e.status === 'archived') return res.status(400).json({ error: '事件已归档' });
+  // 走失寻人：必须先登记发现信息才能关闭
+  if (status === 'resolved' && e.type === 'lost_child') {
+    const fr = db.prepare('SELECT 1 FROM found_reports WHERE event_id=?').get(e.id);
+    if (!fr) return res.status(400).json({ error: '走失寻人事件须先由巡场登记发现信息（发现地点/陪同人/孩子状态/是否安抚）才能关闭' });
+  }
   db.prepare('UPDATE events SET status=?, resolved_at=COALESCE(resolved_at, ?) WHERE id=?')
     .run(status, status === 'resolved' ? nowIso() : null, e.id);
   addTimeline(e.id, 'status', req.user, `事件状态变更为「${label}」`);

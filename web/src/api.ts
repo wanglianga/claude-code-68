@@ -1,6 +1,6 @@
 import type {
   Attraction, Checkin, Child, EventDetail, EventItem, Member, Overview,
-  Party, PatrolLog, RecommendResult, ReviewResult, TimelineEntry, User,
+  Party, PatrolLog, RecommendResult, ReviewResult, SearchAlertItem, User,
 } from './types';
 
 const TOKEN_KEY = 'pg_token';
@@ -73,6 +73,13 @@ export const api = {
     post<{ ok: boolean }>(`/api/events/${id}/timeline`, { kind, content, meta }),
   setEventStatus: (id: number, status: string) => post<{ ok: boolean }>(`/api/events/${id}/status`, { status }),
   archiveEvent: (id: number, body: unknown) => post<{ ok: boolean }>(`/api/events/${id}/archive`, body),
+  alerts: () => get<SearchAlertItem[]>('/api/alerts/active'),
+  regenSearchTask: (id: number) => post<{ ok: boolean }>(`/api/events/${id}/search-task`),
+  reportFound: (id: number, body: {
+    found_zone: string; companion: string; child_state: string;
+    need_comfort: boolean; taken_by_other: boolean;
+    other_guardian_name?: string; other_guardian_phone?: string;
+  }) => post<{ ok: boolean }>(`/api/events/${id}/found`, body),
 
   review: (params: Record<string, string>) => {
     const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v)).toString();

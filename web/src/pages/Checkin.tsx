@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import { Card, Chip, Empty, ErrorBox, OkBox } from '../components';
+import SearchAlert from '../components/SearchAlert';
 import { ageOf, fmtT, MEMBER_TYPE, parseJSON } from '../util';
 import type { Child, Guardian, Member } from '../types';
 
@@ -63,7 +64,9 @@ export default function Checkin() {
   });
 
   return (
-    <div className="checkin-layout">
+    <div>
+      <SearchAlert />
+      <div className="checkin-layout">
       <Card title="入园核验（会员 → 儿童 → 陪同人授权 → 限流 → 手环）">
         <div className="step-title"><span className="step-no">1</span>核验会员</div>
         <input placeholder="搜索卡号 / 持卡人 / 手机号" value={q} onChange={(e) => { setQ(e.target.value); }} />
@@ -147,15 +150,21 @@ export default function Checkin() {
                   <td>{c.guardian_name}</td>
                   <td>{fmtT(c.checkin_at)}</td>
                   <td>
-                    <button className="btn btn-sm" disabled={doCheckout.isPending}
-                      onClick={() => doCheckout.mutate(c.id)}>离场</button>
+                    {c.lost_frozen ? (
+                      <Chip tone="bad">🚫 出园冻结 {c.lost_event_code}</Chip>
+                    ) : (
+                      <button className="btn btn-sm" disabled={doCheckout.isPending}
+                        onClick={() => doCheckout.mutate(c.id)}>离场</button>
+                    )}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
+        <ErrorBox error={doCheckout.error} />
       </Card>
     </div>
+  </div>
   );
 }

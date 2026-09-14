@@ -6,10 +6,11 @@ import { ROLE_NAMES } from '../util';
 
 const DEMO = [
   { u: 'frontdesk', p: 'fd123456', desc: '入园核验 / 家长沟通' },
-  { u: 'patrol', p: 'pt123456', desc: '巡场记录 / 设备状态' },
+  { u: 'patrol', p: 'pt123456', desc: '巡场记录 / 走失查找' },
   { u: 'manager', p: 'mg123456', desc: '事件归档 / 安全复盘' },
   { u: 'medical', p: 'md123456', desc: '急救处置 / 标记解决' },
   { u: 'activity', p: 'ac123456', desc: '生日会 / 托管班负责人' },
+  { u: 'security', p: 'sc123456', desc: '门口安保 / 出园风险提示' },
 ];
 
 export default function Login() {

@@ -32,6 +32,27 @@ export interface Checkin {
   checkin_at: string; checkout_at: string | null;
   child_name?: string; guardian_name?: string; guardian_phone?: string;
   height_cm?: number; card_no?: string; zone?: string | null;
+  /** 走失查找期间：手环出园冻结标记与对应事件编号 */
+  lost_frozen?: number; lost_event_code?: string | null;
+}
+
+export interface SearchTask {
+  id: number; event_id: number; child_id: number;
+  wristband_no: string | null; last_zone: string;
+  cameras: string; assignments: string; status: string; created_at: string;
+}
+
+export interface FoundReport {
+  id: number; event_id: number; found_zone: string; companion: string;
+  child_state: string; need_comfort: number; taken_by_other: number;
+  other_guardian_name: string | null; other_guardian_phone: string | null;
+  recorded_by_name: string; created_at: string;
+}
+
+export interface SearchAlertItem {
+  event_id: number; code: string; status: string; created_at: string;
+  child_id: number; child_name: string;
+  wristband_no: string | null; last_zone: string | null;
 }
 
 export interface EventItem {
@@ -83,6 +104,7 @@ export interface EventDetail {
   event: EventItem; timeline: TimelineEntry[];
   child: Child | null; member: Member | null;
   guardians: Guardian[]; parties: Party[];
+  search_task: SearchTask | null; found_report: FoundReport | null;
 }
 
 export interface ArchiveData {
