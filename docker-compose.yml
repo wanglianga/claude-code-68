@@ -1,0 +1,19 @@
+# 城市儿童游乐场 · 会员入园与安全事故处置系统
+# 单服务编排：应用内置 SQLite（持久化到 named volume），无其他依赖服务。
+# 仅将应用端口发布到宿主：${CC_PUBLISH_PORT}:8080
+services:
+  app:
+    build: .
+    image: playground-safety-app
+    container_name: ${COMPOSE_PROJECT_NAME:-playground}-app
+    ports:
+      - "${CC_PUBLISH_PORT}:8080"
+    environment:
+      PORT: 8080
+      DATA_DIR: /app/data
+    volumes:
+      - app-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  app-data:

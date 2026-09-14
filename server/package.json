@@ -1,0 +1,14 @@
+{
+  "name": "playground-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "城市儿童游乐场会员入园与安全事故处置系统 - 服务端",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "express": "^4.21.2"
+  }
+}

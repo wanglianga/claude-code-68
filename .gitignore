@@ -1,0 +1,67 @@
+# Dependencies and generated output
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+target/
+**/target/
+coverage/
+**/coverage/
+
+# Environment, credentials, and local data
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite
+*.sqlite3
+*.db
+data/
+server/data/
+
+# Logs, caches, and temporary files
+*.log
+logs/
+.cache/
+**/.cache/
+.vite/
+**/.vite/
+.eslintcache
+tmp/
+temp/
+*.tmp
+
+# Local agent configuration and QA artifacts
+.claude/
+**/.claude/
+CLAUDE.md
+**/CLAUDE.md
+.codex/
+**/.codex/
+memory/
+**/memory/
+memory.*
+skill/
+skills/
+**/skill/
+**/skills/
+*_traces/
+traces/
+qa/
+QA/
+qa-*.json
+qa-*.md
+*.jsonl
+.playwright-cli/
+output/playwright/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
