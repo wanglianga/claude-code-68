@@ -1,6 +1,6 @@
 import type {
   Attraction, Checkin, Child, EventDetail, EventItem, Member, Overview,
-  Party, PatrolLog, RecommendResult, ReviewResult, SearchAlertItem, User,
+  Party, PatrolLog, RecommendResult, ReviewResult, SearchAlertItem, StopTicket, TicketDetail, User,
 } from './types';
 
 const TOKEN_KEY = 'pg_token';
@@ -91,4 +91,20 @@ export const api = {
     post<{ ok: boolean; id: number }>('/api/parties', body),
   addPartyChild: (partyId: number, child_id: number, guardian_id: number) =>
     post<{ ok: boolean }>(`/api/parties/${partyId}/children`, { child_id, guardian_id }),
+
+  tickets: () => get<StopTicket[]>('/api/tickets'),
+  ticket: (id: number) => get<TicketDetail>(`/api/tickets/${id}`),
+  stopAttraction: (id: number, reason: string, stop_status: string) =>
+    post<{ ok: boolean; code: string }>(`/api/attractions/${id}/stop`, { reason, stop_status }),
+  reopenAttraction: (id: number) => post<{ ok: boolean }>(`/api/attractions/${id}/reopen`),
+  divert: (ticketId: number, queue_entry_id: number, transferred_to: string) =>
+    post<{ ok: boolean }>(`/api/tickets/${ticketId}/divert`, { queue_entry_id, transferred_to }),
+  addVoucher: (ticketId: number, body: { member_id: number; child_id?: number | null; type: string; amount: string; note: string }) =>
+    post<{ ok: boolean; applied: number }>(`/api/tickets/${ticketId}/vouchers`, body),
+  addRecheck: (ticketId: number, body: { photos: string[]; result: string; inspector: string }) =>
+    post<{ ok: boolean }>(`/api/tickets/${ticketId}/recheck`, body),
+  confirmRecheck: (id: number) => post<{ ok: boolean }>(`/api/rechecks/${id}/confirm`),
+  addIssue: (ticketId: number, body: { type: string; title: string; detail: string }) =>
+    post<{ ok: boolean }>(`/api/tickets/${ticketId}/issues`, body),
+  doneIssue: (id: number) => post<{ ok: boolean }>(`/api/issues/${id}/done`),
 };

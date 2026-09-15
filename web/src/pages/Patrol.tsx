@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
-import { Card, Chip, ErrorBox, Loading, OkBox } from '../components';
+import { Card, Chip, ErrorBox, Field, Loading, Modal, OkBox } from '../components';
 import { ATTR_STATUS, fmtDT, PATROL_STATUS } from '../util';
 
 export default function Patrol() {
@@ -38,8 +39,15 @@ export default function Patrol() {
     onError: () => setOkMsg(null),
   });
 
-  const setAttr = useMutation({
-    mutationFn: ({ id, status }: { id: number; status: string }) => api.setAttractionStatus(id, status),
+  // 设备临停/恢复：走处理单流程（停止生成处理单，恢复需复检+负责人确认）
+  const [stopTarget, setStopTarget] = useState<{ id: number; name: string; status: string } | null>(null);
+  const [stopReason, setStopReason] = useState('');
+  const stop = useMutation({
+    mutationFn: () => api.stopAttraction(stopTarget!.id, stopReason, stopTarget!.status),
+    onSuccess: () => { setStopTarget(null); setStopReason(''); qc.invalidateQueries(); },
+  });
+  const reopen = useMutation({
+    mutationFn: (id: number) => api.reopenAttraction(id),
     onSuccess: () => qc.invalidateQueries(),
   });
 
@@ -84,7 +92,7 @@ export default function Patrol() {
           </button>
         </Card>
 
-        <Card title="设备开放状态控制">
+        <Card title="设备开放状态控制（临停/恢复走处理单流程）">
           <div className="patrol-grid">
             {data?.attractions.filter((a) => !a.is_facility).map((a) => {
               const st = ATTR_STATUS[a.status];
@@ -95,20 +103,46 @@ export default function Patrol() {
                   </div>
                   <div className="muted small mt8">当前 {data.occupancy[a.name] || 0}/{a.capacity} 人</div>
                   <div className="row mt8">
-                    {(['open', 'maintenance', 'emergency_stop'] as const).map((s) => (
-                      <button key={s} className="btn btn-sm" disabled={!canEdit || a.status === s || setAttr.isPending}
-                        onClick={() => setAttr.mutate({ id: a.id, status: s })}>
-                        {ATTR_STATUS[s].label}
-                      </button>
-                    ))}
+                    {a.status === 'open' && (
+                      <>
+                        <button className="btn btn-sm" disabled={!canEdit}
+                          onClick={() => setStopTarget({ id: a.id, name: a.name, status: 'maintenance' })}>临停</button>
+                        <button className="btn btn-sm" disabled={!canEdit}
+                          onClick={() => setStopTarget({ id: a.id, name: a.name, status: 'emergency_stop' })}>急停</button>
+                      </>
+                    )}
+                    {['maintenance', 'emergency_stop'].includes(a.status) && (
+                      <button className="btn btn-sm" disabled={!canEdit || reopen.isPending}
+                        onClick={() => reopen.mutate(a.id)}>恢复开放</button>
+                    )}
                   </div>
                 </div>
               );
             })}
           </div>
-          <ErrorBox error={setAttr.error} />
+          <ErrorBox error={stop.error} />
+          <ErrorBox error={reopen.error} />
+          {reopen.isError && (
+            <div className="small mt8">前往 <Link to="/tickets">设备临停分流</Link> 完成检修照片与负责人确认后再恢复开放。</div>
+          )}
         </Card>
       </div>
+
+      {stopTarget && (
+        <Modal title={`${stopTarget.name} · 发起${stopTarget.status === 'maintenance' ? '临停（维护中）' : '急停'}`}
+          onClose={() => setStopTarget(null)}>
+          <Field label="临停原因">
+            <textarea autoFocus value={stopReason} onChange={(e) => setStopReason(e.target.value)}
+              placeholder="如：弹簧区域异响，临时检修" />
+          </Field>
+          <div className="muted small mb8">确认后将自动生成临停处理单：快照受影响儿童与排队，可登记分流、补券与安全复检。</div>
+          <ErrorBox error={stop.error} />
+          <button className="btn btn-primary" style={{ width: '100%' }}
+            disabled={stop.isPending} onClick={() => stop.mutate()}>
+            确认临停并生成处理单
+          </button>
+        </Modal>
+      )}
 
       <Card className="mt16" title="巡场记录流水（滑梯 / 蹦床 / 攀爬网 / 海洋球池 / 卫生间 / 休息区）">
         <table className="table">

@@ -55,6 +55,55 @@ export interface SearchAlertItem {
   wristband_no: string | null; last_zone: string | null;
 }
 
+// ---------- 设备临停分流 ----------
+export interface AffectedChild {
+  child_id: number; name: string; height_cm: number;
+  wristband_no: string | null; card_no: string; member_id: number; source: string;
+}
+
+export interface StopTicket {
+  id: number; code: string; attraction_id: number; status: string;
+  reason: string; affected: AffectedChild[];
+  created_by_name: string; created_at: string; recovered_at: string | null;
+  attraction_name?: string; attraction_key?: string; attraction_status?: string;
+  waiting_count?: number; voucher_count?: number; open_issue_count?: number;
+}
+
+export interface QueueEntry {
+  id: number; attraction_id: number; child_id: number; ticket_id: number | null;
+  queue_no: string; status: string; transferred_to: string | null; created_at: string;
+  child_name?: string; height_cm?: number;
+}
+
+export interface Voucher {
+  id: number; ticket_id: number; member_id: number; child_id: number | null;
+  type: string; amount: string; note: string; applied: number;
+  issued_by_name: string; created_at: string;
+  card_no?: string; child_name?: string | null;
+}
+
+export interface TicketIssue {
+  id: number; ticket_id: number; type: string; title: string; detail: string;
+  status: string; created_by_name: string; created_at: string;
+}
+
+export interface Recheck {
+  id: number; attraction_id: number; ticket_id: number;
+  photos: string; result: string; inspector: string;
+  confirmed_by: string | null; confirmed_at: string | null;
+  created_by_name: string; created_at: string;
+}
+
+export interface TicketDetail {
+  ticket: StopTicket;
+  queue: QueueEntry[];
+  vouchers: Voucher[];
+  issues: TicketIssue[];
+  rechecks: Recheck[];
+  alternatives: { attraction: Attraction; occupancy: number; suitable: string[] }[];
+  compensation_options: string[];
+}
+
 export interface EventItem {
   id: number; code: string; type: string; title: string; description: string;
   child_id: number | null; member_id: number | null; attraction_id: number | null;

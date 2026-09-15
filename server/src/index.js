@@ -173,7 +173,78 @@ app.patch('/api/attractions/:id', auth, requireRole('patrol', 'manager'), (req, 
     return res.status(400).json({ error: '非法状态' });
   const a = db.prepare('SELECT * FROM attractions WHERE id=?').get(req.params.id);
   if (!a) return res.status(404).json({ error: '项目不存在' });
+  // 游玩项目的临停/恢复必须走处理单流程，保证受影响儿童分流与安全复检
+  if (!a.is_facility && ['maintenance', 'emergency_stop'].includes(status))
+    return res.status(400).json({ error: '请通过「设备临停分流」发起临停（POST /api/attractions/:id/stop），自动生成处理单' });
+  if (!a.is_facility && status === 'open' && ['maintenance', 'emergency_stop'].includes(a.status))
+    return res.status(400).json({ error: '请在临停处理单中完成检修照片与负责人确认后恢复开放（补券不能替代安全复检）' });
   db.prepare('UPDATE attractions SET status=?, updated_at=? WHERE id=?').run(status, nowIso(), a.id);
+  res.json({ ok: true });
+});
+
+// 设备临停：生成处理单，快照受影响儿童（在场定位 + 排队）
+app.post('/api/attractions/:id/stop', auth, requireRole('patrol', 'manager'), (req, res) => {
+  const a = db.prepare('SELECT * FROM attractions WHERE id=?').get(req.params.id);
+  if (!a || a.is_facility) return res.status(404).json({ error: '游玩项目不存在' });
+  const { reason = '', stop_status = 'maintenance' } = req.body || {};
+  if (!['maintenance', 'emergency_stop'].includes(stop_status))
+    return res.status(400).json({ error: '临停状态须为 maintenance 或 emergency_stop' });
+  if (['maintenance', 'emergency_stop'].includes(a.status))
+    return res.status(400).json({ error: '该项目已处于临停状态，请直接处理现有处理单' });
+
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE attractions SET status=?, updated_at=? WHERE id=?').run(stop_status, nowIso(), a.id);
+    // 受影响儿童：手环当前定位在该项目的在场儿童 + 该项目排队儿童
+    const zoneKids = db.prepare(`
+      SELECT ch.id AS child_id, ch.name, ch.height_cm, ci.wristband_no, m.id AS member_id, m.card_no, '在场' AS source
+      FROM wristband_locations wl
+      JOIN checkins ci ON ci.wristband_no = wl.wristband_no AND ci.status='inside'
+      JOIN children ch ON ch.id = ci.child_id
+      JOIN members m ON m.id = ci.member_id
+      WHERE wl.zone = ?`).all(a.name);
+    const queueKids = db.prepare(`
+      SELECT ch.id AS child_id, ch.name, ch.height_cm, ci.wristband_no, m.id AS member_id, m.card_no, '排队' AS source
+      FROM queue_entries q
+      JOIN children ch ON ch.id = q.child_id
+      LEFT JOIN checkins ci ON ci.child_id = ch.id AND ci.status='inside'
+      LEFT JOIN members m ON m.id = ch.member_id
+      WHERE q.attraction_id = ? AND q.status = 'waiting'`).all(a.id);
+    const seen = new Set();
+    const affected = [...zoneKids, ...queueKids].filter((k) => !seen.has(k.child_id) && seen.add(k.child_id));
+    const dstr = cnDay().replace(/-/g, '');
+    const seq = db.prepare("SELECT COUNT(*) c FROM stop_tickets WHERE code LIKE ?").get(`ST-${dstr}-%`).c + 1;
+    const code = `ST-${dstr}-${String(seq).padStart(4, '0')}`;
+    const info = db.prepare(`INSERT INTO stop_tickets (code, attraction_id, status, reason, affected, created_by_id, created_by_name, created_at)
+                             VALUES (?,?, 'open', ?,?,?,?,?)`)
+      .run(code, a.id, reason || '设备临时检修', JSON.stringify(affected), req.user.id, req.user.name, nowIso());
+    const ticketId = info.lastInsertRowid;
+    db.prepare("UPDATE queue_entries SET ticket_id=? WHERE attraction_id=? AND status='waiting'").run(ticketId, a.id);
+    return { ticketId, code, affected: affected.length };
+  });
+  res.json({ ok: true, ...tx() });
+});
+
+// 恢复开放：必须有检修照片 + 负责人确认（补券不能替代安全复检）
+app.post('/api/attractions/:id/reopen', auth, requireRole('patrol', 'manager'), (req, res) => {
+  const a = db.prepare('SELECT * FROM attractions WHERE id=?').get(req.params.id);
+  if (!a || a.is_facility) return res.status(404).json({ error: '游玩项目不存在' });
+  if (!['maintenance', 'emergency_stop'].includes(a.status))
+    return res.status(400).json({ error: '该项目当前不在临停状态' });
+  const ticket = db.prepare("SELECT * FROM stop_tickets WHERE attraction_id=? AND status='open' ORDER BY id DESC").get(a.id);
+  if (!ticket) return res.status(400).json({ error: '未找到该项目进行中的临停处理单' });
+  const recheck = db.prepare('SELECT * FROM rechecks WHERE ticket_id=? ORDER BY id DESC LIMIT 1').get(ticket.id);
+  const photos = recheck ? parse(recheck.photos, []) : [];
+  if (!recheck || photos.length === 0)
+    return res.status(400).json({ error: '恢复开放前须由巡场补充检修照片（补券不能替代安全复检）' });
+  if (!recheck.confirmed_by)
+    return res.status(400).json({ error: '恢复开放前须经负责人（店长）确认复检结果（补券不能替代安全复检）' });
+
+  const tx = db.transaction(() => {
+    db.prepare("UPDATE attractions SET status='open', updated_at=? WHERE id=?").run(nowIso(), a.id);
+    db.prepare("UPDATE stop_tickets SET status='recovered', recovered_at=? WHERE id=?").run(nowIso(), ticket.id);
+    db.prepare("UPDATE queue_entries SET status='cancelled' WHERE attraction_id=? AND status='waiting'").run(a.id);
+  });
+  tx();
   res.json({ ok: true });
 });
 
@@ -182,9 +253,149 @@ app.post('/api/wristbands/scan', auth, (req, res) => {
   if (!wristband_no || !zone) return res.status(400).json({ error: '手环号与区域必填' });
   const ci = db.prepare("SELECT * FROM checkins WHERE wristband_no=? AND status='inside'").get(wristband_no);
   if (!ci) return res.status(400).json({ error: '该手环无在场记录' });
+  // 避免孩子回到已停用项目
+  const stopped = db.prepare("SELECT * FROM attractions WHERE name=? AND is_facility=0 AND status IN ('maintenance','emergency_stop')").get(zone);
+  if (stopped) return res.status(400).json({ error: `${zone}已临停，禁止进入；请按临停处理单分流到可替代项目` });
   db.prepare(`INSERT INTO wristband_locations (wristband_no, zone, updated_at) VALUES (?,?,?)
               ON CONFLICT(wristband_no) DO UPDATE SET zone=excluded.zone, updated_at=excluded.updated_at`)
     .run(wristband_no, zone, nowIso());
+  res.json({ ok: true });
+});
+
+// ---------------- 设备临停分流（处理单） ----------------
+app.get('/api/tickets', auth, (req, res) => {
+  const rows = db.prepare(`
+    SELECT t.*, a.name AS attraction_name, a.key AS attraction_key
+    FROM stop_tickets t JOIN attractions a ON a.id = t.attraction_id
+    ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END, t.id DESC`).all();
+  const cnt = (sql) => Object.fromEntries(db.prepare(sql).all().map((r) => [r.ticket_id, r.c]));
+  const qMap = cnt("SELECT ticket_id, COUNT(*) c FROM queue_entries WHERE status='waiting' GROUP BY ticket_id");
+  const vMap = cnt('SELECT ticket_id, COUNT(*) c FROM vouchers GROUP BY ticket_id');
+  const iMap = cnt("SELECT ticket_id, COUNT(*) c FROM ticket_issues WHERE status='open' GROUP BY ticket_id");
+  res.json(rows.map((t) => ({
+    ...t,
+    affected: parse(t.affected, []),
+    waiting_count: qMap[t.id] || 0,
+    voucher_count: vMap[t.id] || 0,
+    open_issue_count: iMap[t.id] || 0,
+  })));
+});
+
+app.get('/api/tickets/:id', auth, (req, res) => {
+  const t = db.prepare(`SELECT t.*, a.name AS attraction_name, a.key AS attraction_key, a.status AS attraction_status
+                        FROM stop_tickets t JOIN attractions a ON a.id=t.attraction_id WHERE t.id=?`).get(req.params.id);
+  if (!t) return res.status(404).json({ error: '处理单不存在' });
+  const affected = parse(t.affected, []);
+  const queue = db.prepare(`
+    SELECT q.*, ch.name AS child_name, ch.height_cm FROM queue_entries q
+    JOIN children ch ON ch.id=q.child_id WHERE q.attraction_id=? ORDER BY q.queue_no`).all(t.attraction_id);
+  const vouchers = db.prepare(`
+    SELECT v.*, m.card_no, ch.name AS child_name FROM vouchers v
+    JOIN members m ON m.id=v.member_id LEFT JOIN children ch ON ch.id=v.child_id
+    WHERE v.ticket_id=? ORDER BY v.id DESC`).all(t.id);
+  const issues = db.prepare('SELECT * FROM ticket_issues WHERE ticket_id=? ORDER BY id DESC').all(t.id);
+  const rechecks = db.prepare('SELECT * FROM rechecks WHERE ticket_id=? ORDER BY id DESC').all(t.id);
+  // 可替代项目：开放中、非本项目，且至少适合一名受影响儿童（身高+禁玩）
+  const occ = occupancy();
+  const openAttrs = db.prepare("SELECT * FROM attractions WHERE is_facility=0 AND status='open' AND id != ?").all(t.attraction_id);
+  const alternatives = openAttrs.map((a) => {
+    const suitable = affected.filter((ac) => {
+      const c = getChild(ac.child_id);
+      if (!c) return false;
+      const banned = parse(c.banned, []);
+      return !banned.includes(a.key)
+        && (a.min_height == null || c.height_cm >= a.min_height)
+        && (a.max_height == null || c.height_cm <= a.max_height);
+    }).map((ac) => ac.name);
+    return { attraction: a, occupancy: occ[a.key] || 0, suitable };
+  }).filter((x) => x.suitable.length > 0);
+  res.json({
+    ticket: { ...t, affected },
+    queue, vouchers, issues, rechecks, alternatives,
+    compensation_options: ['次卡补偿', '陪同券', '折扣券', '退款'],
+  });
+});
+
+// 排队号分流（前台解释后更新，避免孩子回到已停用项目）
+app.post('/api/tickets/:id/divert', auth, requireRole('frontdesk', 'manager'), (req, res) => {
+  const t = db.prepare('SELECT * FROM stop_tickets WHERE id=?').get(req.params.id);
+  if (!t) return res.status(404).json({ error: '处理单不存在' });
+  const { queue_entry_id, transferred_to } = req.body || {};
+  const q = db.prepare("SELECT * FROM queue_entries WHERE id=? AND attraction_id=? AND status='waiting'")
+    .get(queue_entry_id, t.attraction_id);
+  if (!q) return res.status(400).json({ error: '排队记录不存在或已处理' });
+  const target = db.prepare("SELECT * FROM attractions WHERE name=? AND is_facility=0").get(transferred_to || '');
+  if (!target) return res.status(400).json({ error: '分流去向项目不存在' });
+  if (target.id === t.attraction_id) return res.status(400).json({ error: '不能分流回已停用项目' });
+  if (target.status !== 'open') return res.status(400).json({ error: `${target.name} 当前未开放，不可作为分流去向` });
+  db.prepare("UPDATE queue_entries SET status='transferred', transferred_to=? WHERE id=?").run(target.name, q.id);
+  res.json({ ok: true });
+});
+
+// 发放补券（次卡补偿直接写入会员剩余次数）
+app.post('/api/tickets/:id/vouchers', auth, requireRole('frontdesk', 'manager'), (req, res) => {
+  const t = db.prepare('SELECT * FROM stop_tickets WHERE id=?').get(req.params.id);
+  if (!t) return res.status(404).json({ error: '处理单不存在' });
+  if (t.status !== 'open') return res.status(400).json({ error: '处理单已关闭' });
+  const { member_id, child_id = null, type, amount = '', note = '' } = req.body || {};
+  if (!member_id || !type) return res.status(400).json({ error: '会员与补券类型必填' });
+  const m = getMember(member_id);
+  if (!m) return res.status(400).json({ error: '会员不存在' });
+  let applied = 0;
+  const n = parseInt(amount, 10);
+  const tx = db.transaction(() => {
+    if (type === '次卡补偿' && n > 0) {
+      db.prepare('UPDATE members SET remaining_sessions = remaining_sessions + ? WHERE id=?').run(n, m.id);
+      applied = 1;
+    }
+    db.prepare(`INSERT INTO vouchers (ticket_id, member_id, child_id, type, amount, note, applied, issued_by_name, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run(t.id, member_id, child_id, type, String(amount), note, applied, req.user.name, nowIso());
+  });
+  tx();
+  res.json({ ok: true, applied });
+});
+
+// 巡场提交安全复检（检修照片 + 结果）
+app.post('/api/tickets/:id/recheck', auth, requireRole('patrol', 'manager'), (req, res) => {
+  const t = db.prepare('SELECT * FROM stop_tickets WHERE id=?').get(req.params.id);
+  if (!t) return res.status(404).json({ error: '处理单不存在' });
+  if (t.status !== 'open') return res.status(400).json({ error: '处理单已关闭' });
+  const { photos = [], result = '', inspector = '' } = req.body || {};
+  const photoList = (Array.isArray(photos) ? photos : []).map((s) => String(s).trim()).filter(Boolean);
+  if (photoList.length === 0) return res.status(400).json({ error: '检修照片至少 1 张（补券不能替代安全复检）' });
+  if (!result.trim() || !inspector.trim()) return res.status(400).json({ error: '复检结果与检修人必填' });
+  const info = db.prepare(`INSERT INTO rechecks (attraction_id, ticket_id, photos, result, inspector, created_by_name, created_at)
+                           VALUES (?,?,?,?,?,?,?)`)
+    .run(t.attraction_id, t.id, JSON.stringify(photoList), result, inspector, req.user.name, nowIso());
+  res.json({ ok: true, id: info.lastInsertRowid });
+});
+
+// 负责人（店长）确认复检结果
+app.post('/api/rechecks/:id/confirm', auth, requireRole('manager'), (req, res) => {
+  const r = db.prepare('SELECT * FROM rechecks WHERE id=?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: '复检记录不存在' });
+  if (r.confirmed_by) return res.status(400).json({ error: '该复检已确认' });
+  db.prepare('UPDATE rechecks SET confirmed_by=?, confirmed_at=? WHERE id=?').run(req.user.name, nowIso(), r.id);
+  res.json({ ok: true });
+});
+
+// 处理单子项：生日会延误 / 课程补时 / 家长投诉
+const ISSUE_TYPES = { party_delay: '生日会延误', class_makeup: '课程补时', complaint: '家长投诉' };
+app.post('/api/tickets/:id/issues', auth, (req, res) => {
+  const t = db.prepare('SELECT * FROM stop_tickets WHERE id=?').get(req.params.id);
+  if (!t) return res.status(404).json({ error: '处理单不存在' });
+  const { type, title, detail = '' } = req.body || {};
+  if (!ISSUE_TYPES[type]) return res.status(400).json({ error: '子项类型须为生日会延误/课程补时/家长投诉' });
+  if (!title || !title.trim()) return res.status(400).json({ error: '子项标题必填' });
+  const info = db.prepare('INSERT INTO ticket_issues (ticket_id, type, title, detail, status, created_by_name, created_at) VALUES (?,?,?,?,?,?,?)')
+    .run(t.id, type, title.trim(), detail, 'open', req.user.name, nowIso());
+  res.json({ ok: true, id: info.lastInsertRowid });
+});
+app.post('/api/issues/:id/done', auth, requireRole('frontdesk', 'manager', 'patrol'), (req, res) => {
+  const i = db.prepare('SELECT * FROM ticket_issues WHERE id=?').get(req.params.id);
+  if (!i) return res.status(404).json({ error: '子项不存在' });
+  db.prepare("UPDATE ticket_issues SET status='done' WHERE id=?").run(i.id);
   res.json({ ok: true });
 });
 

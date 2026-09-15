@@ -160,6 +160,62 @@ CREATE TABLE IF NOT EXISTS found_reports (
   recorded_by_name TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stop_tickets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,             -- ST-20260914-0001
+  attraction_id INTEGER NOT NULL REFERENCES attractions(id),
+  status TEXT NOT NULL DEFAULT 'open',   -- open 处理中 | recovered 已恢复
+  reason TEXT NOT NULL DEFAULT '',
+  affected TEXT NOT NULL DEFAULT '[]',   -- 受影响儿童快照 JSON
+  created_by_id INTEGER,
+  created_by_name TEXT,
+  created_at TEXT NOT NULL,
+  recovered_at TEXT
+);
+CREATE TABLE IF NOT EXISTS queue_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attraction_id INTEGER NOT NULL REFERENCES attractions(id),
+  child_id INTEGER NOT NULL REFERENCES children(id),
+  ticket_id INTEGER REFERENCES stop_tickets(id),
+  queue_no TEXT NOT NULL,                -- 排队号 如 B-01
+  status TEXT NOT NULL DEFAULT 'waiting',-- waiting | transferred | cancelled
+  transferred_to TEXT,                   -- 分流去向项目名
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vouchers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id INTEGER NOT NULL REFERENCES stop_tickets(id),
+  member_id INTEGER NOT NULL REFERENCES members(id),
+  child_id INTEGER REFERENCES children(id),
+  type TEXT NOT NULL,                    -- 次卡补偿 | 陪同券 | 折扣券 | 退款
+  amount TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  applied INTEGER NOT NULL DEFAULT 0,    -- 是否已实际写入会员权益
+  issued_by_name TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ticket_issues (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id INTEGER NOT NULL REFERENCES stop_tickets(id),
+  type TEXT NOT NULL,                    -- party_delay 生日会延误 | class_makeup 课程补时 | complaint 家长投诉
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open',   -- open | done
+  created_by_name TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rechecks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attraction_id INTEGER NOT NULL REFERENCES attractions(id),
+  ticket_id INTEGER REFERENCES stop_tickets(id),
+  photos TEXT NOT NULL DEFAULT '[]',     -- 检修照片 JSON
+  result TEXT NOT NULL,
+  inspector TEXT NOT NULL,               -- 检修人
+  confirmed_by TEXT,                     -- 负责人确认（店长）
+  confirmed_at TEXT,
+  created_by_name TEXT,
+  created_at TEXT NOT NULL
+);
 `);
 
 const nowIso = () => new Date().toISOString();
@@ -388,6 +444,36 @@ export function seedIfEmpty() {
     const task3 = generateSearchTask({ id: ev3, child_id: cGuo }, '休息区');
     insTL.run(ev3, 'search', ac, '周婷', 'activity', `已生成查找任务：${searchTaskSummary(task3)}`,
       JSON.stringify({ task_id: task3.id }), minutesAgo(2));
+
+    // ---------- 设备临停分流 ----------
+    const insTicket = db.prepare(`INSERT INTO stop_tickets (code, attraction_id, status, reason, affected, created_by_id, created_by_name, created_at, recovered_at)
+                                  VALUES (?,?,?,?,?,?,?,?,?)`);
+    const insQueue = db.prepare(`INSERT INTO queue_entries (attraction_id, child_id, ticket_id, queue_no, status, transferred_to, created_at)
+                                 VALUES (?,?,?,?,?,?,?)`);
+    const insRecheck = db.prepare(`INSERT INTO rechecks (attraction_id, ticket_id, photos, result, inspector, confirmed_by, confirmed_at, created_by_name, created_at)
+                                   VALUES (?,?,?,?,?,?,?,?,?)`);
+    const insIssue = db.prepare(`INSERT INTO ticket_issues (ticket_id, type, title, detail, status, created_by_name, created_at)
+                                 VALUES (?,?,?,?,?,?,?)`);
+
+    // 历史单：攀爬网临停已恢复（含检修照片 + 店长确认，作为恢复标准示例）
+    const st1 = insTicket.run(`ST-${dstr}-0001`, 3, 'recovered', '卡扣松动，临时检修',
+      JSON.stringify([{ child_id: 5, name: '周乐乐', height_cm: 130, wristband_no: 'WB-103', card_no: 'M1004', member_id: 4, source: '在场' }]),
+      pt, '李强', minutesAgo(60 * 30), minutesAgo(60 * 28)).lastInsertRowid;
+    insRecheck.run(3, st1, JSON.stringify(['卡扣更换特写.jpg', '攀爬网复检合影.jpg']),
+      '更换卡扣 3 个，满载测试合格', '维保 刘工', '赵敏', minutesAgo(60 * 28), '李强', minutesAgo(60 * 29));
+
+    // 当前单：蹦床临停（处理中）——受影响儿童来自排队快照
+    const affectedTrampoline = [
+      { child_id: 1, name: '张小雨', height_cm: 105, wristband_no: 'WB-101', card_no: 'M1001', member_id: 1, source: '排队' },
+      { child_id: 5, name: '周乐乐', height_cm: 130, wristband_no: 'WB-103', card_no: 'M1004', member_id: 4, source: '排队' },
+    ];
+    const st2 = insTicket.run(`ST-${dstr}-0002`, 2, 'open', '弹簧区域异响，临时检修',
+      JSON.stringify(affectedTrampoline), pt, '李强', minutesAgo(150), null).lastInsertRowid;
+    insQueue.run(2, 1, st2, 'B-01', 'waiting', null, minutesAgo(160));
+    insQueue.run(2, 5, st2, 'B-02', 'waiting', null, minutesAgo(155));
+    insQueue.run(1, 3, null, 'S-01', 'waiting', null, minutesAgo(50)); // 滑梯正常排队（未受影响）
+    insIssue.run(st2, 'party_delay', '「张小雨的5岁生日会」蹦床环节延误',
+      '生日会 15:00 开始，蹦床环节预计延误 30 分钟，已通知家长调整流程', 'open', '周婷', minutesAgo(100));
   });
   tx();
   console.log('[seed] 演示数据已初始化');
