@@ -90,6 +90,8 @@ export const KIND_META: Record<string, { label: string; icon: string; tone: stri
   benefit: { label: '权益调整', icon: '💳', tone: 'warn' },
   search: { label: '查找任务', icon: '🔍', tone: 'bad' },
   found: { label: '发现孩子', icon: '🎯', tone: 'ok' },
+  settlement: { label: '赔付协商决策', icon: '🤝', tone: 'warn' },
+  review: { label: '事故复盘', icon: '🗂️', tone: 'ok' },
   note: { label: '备注', icon: '📝', tone: 'info' },
 };
 
@@ -102,4 +104,27 @@ export const MEMBER_TYPE: Record<string, string> = { member: '会员卡', punch:
 /** 项目 key → 中文名（禁玩项目等场景展示用） */
 export const ATTR_KEY_NAMES: Record<string, string> = {
   slide: '滑梯', trampoline: '蹦床', climb: '攀爬网', ballpit: '海洋球池',
+};
+
+// ---------- 受伤赔付协商 ----------
+export const INJURY_TYPES = ['擦伤', '扭伤', '磕碰', '划伤', '其他'];
+
+export const INJURY_PLANS: Record<string, { label: string; icon: string; desc: string }> = {
+  medical_reimburse: { label: '医药费报销', icon: '💰', desc: '门店承担清创/医药费用，金额与凭证登记入档，会员卡计次权益不变' },
+  class_compensation: { label: '课时补偿', icon: '🎟️', desc: '按课时补偿直接写入会员卡（次卡加次数，年卡写入权益说明）' },
+  continue_observation: { label: '继续观察', icon: '👀', desc: '暂不产生赔付，持续跟踪孩子恢复情况，复盘会照常组织' },
+};
+
+export const INJURY_PLAN_LABELS = Object.fromEntries(Object.entries(INJURY_PLANS).map(([k, v]) => [k, v.label]));
+
+export const MARKER_TYPES: Record<string, { label: string; icon: string; hint: string }> = {
+  route: { label: '项目动线', icon: '🔀', hint: '如：下梯口正对排队折返动线，儿童冲下即汇入人流' },
+  positioning: { label: '员工站位', icon: '🧍', hint: '如：事发时巡场固定在项目顶部，落点无人看护' },
+  blindspot: { label: '家长视线盲区', icon: '🙈', hint: '如：家长拍摄/等候位置看不到孩子受伤的角落' },
+};
+
+export const INJURY_STAGE: Record<string, { label: string; tone: string }> = {
+  collecting: { label: '收集中 · 待店长决策', tone: 'warn' },
+  decided: { label: '协商进行中', tone: 'info' },
+  done: { label: '协商已闭环', tone: 'ok' },
 };

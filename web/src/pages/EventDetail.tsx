@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { Card, Chip, Empty, ErrorBox, Field, Loading, Modal } from '../components';
 import {
-  ageOf, ATTR_KEY_NAMES, EVENT_STATUS, EVENT_TYPES, fmtDT, fmtT, KIND_META, MEMBER_TYPE,
+  ageOf, ATTR_KEY_NAMES, EVENT_STATUS, EVENT_TYPES, fmtDT, fmtT, INJURY_TYPES, KIND_META, MEMBER_TYPE,
   parseJSON, ROLE_NAMES, SEVERITY, TIMELINE_KIND_OPTIONS,
 } from '../util';
 import type { ArchiveData } from '../types';
@@ -32,6 +32,7 @@ export default function EventDetail() {
   const { id } = useParams();
   const eventId = Number(id);
   const { user } = useAuth();
+  const nav = useNavigate();
   const qc = useQueryClient();
   const { data, isLoading, error } = useQuery({
     queryKey: ['event', eventId],
@@ -42,6 +43,7 @@ export default function EventDetail() {
   const [content, setContent] = useState('');
   const [meta, setMeta] = useState<Record<string, string>>({});
   const [showArchive, setShowArchive] = useState(false);
+  const [showCreateInjury, setShowCreateInjury] = useState(false);
 
   // 走失查找：发现登记
   const attrs = useQuery({ queryKey: ['attractions'], queryFn: api.attractions });
@@ -78,10 +80,11 @@ export default function EventDetail() {
 
   if (isLoading) return <Loading />;
   if (error || !data) return <ErrorBox error={error} />;
-  const { event, timeline, child, member, guardians, parties, search_task, found_report } = data;
+  const { event, timeline, child, member, guardians, parties, search_task, found_report, injury_case } = data;
   const archive = parseJSON<ArchiveData | null>(event.archive, null);
   const st = EVENT_STATUS[event.status];
   const isLost = event.type === 'lost_child';
+  const isInjuryEvent = ['fall', 'push'].includes(event.type);
   const canOperate = !!user && ['patrol', 'manager'].includes(user.role);
   const needFoundReport = isLost && !found_report; // 走失事件须先登记发现信息才能关闭
   const zones = [...(attrs.data?.attractions.map((a) => a.name) || []), '医疗点', '入口', '出口'];
@@ -258,6 +261,35 @@ export default function EventDetail() {
 
       <div className="detail-layout">
         <div>
+          {isInjuryEvent && (
+            <Card className="mb16"
+              title={injury_case ? `受伤赔付协商单 ${injury_case.code}` : '受伤赔付协商（擦伤 / 扭伤）'}
+              extra={injury_case ? (
+                <span className="row">
+                  {!injury_case.plan && <Chip tone="warn">待店长决策</Chip>}
+                  {injury_case.plan && <Chip tone="info">{injury_case.plan_label}</Chip>}
+                  {injury_case.parent_confirmed ? <Chip tone="ok">家长已确认</Chip> : injury_case.plan ? <Chip tone="warn">待家长确认</Chip> : null}
+                  {injury_case.reviewed ? <Chip tone="ok">复盘已完成</Chip> : injury_case.parent_confirmed ? <Chip tone="warn">待员工复盘</Chip> : null}
+                </span>
+              ) : undefined}>
+              {injury_case ? (
+                <div className="row spread">
+                  <span className="small muted">
+                    收集项目 / 动作 / 陪同人位置 / 急救处理 / 家长诉求；店长选择医药费报销、课时补偿或继续观察后，
+                    会员卡权益与事故复盘会同步调整。
+                  </span>
+                  <Link className="btn btn-primary btn-sm" to={`/injuries/${injury_case.id}`}>进入协商 →</Link>
+                </div>
+              ) : event.status === 'archived' ? (
+                <Empty text="事件已归档，未发起赔付协商" />
+              ) : (
+                <div className="row spread">
+                  <span className="small muted">儿童擦伤或扭伤后，在此收集伤情与诉求并发起赔付协商，生成家长确认与员工复盘任务。</span>
+                  <button className="btn btn-primary btn-sm" onClick={() => setShowCreateInjury(true)}>＋ 发起赔付协商</button>
+                </div>
+              )}
+            </Card>
+          )}
           <Card title="统一事件线（手环定位 · 监控调阅 · 急救箱 · 消毒 · 补偿 · 交接 · 沟通）">
             <div className="timeline mt8">
               {timeline.map((t) => {
@@ -414,6 +446,13 @@ export default function EventDetail() {
         <ArchiveModal eventId={eventId} eventType={event.type} onClose={() => setShowArchive(false)}
           onDone={() => { setShowArchive(false); invalidate(); }} />
       )}
+
+      {showCreateInjury && (
+        <CreateInjuryModal eventId={eventId}
+          defaultChildId={child?.id} defaultAttrId={event.attraction_id}
+          onClose={() => setShowCreateInjury(false)}
+          onDone={(icId) => { setShowCreateInjury(false); invalidate(); nav(`/injuries/${icId}`); }} />
+      )}
     </div>
   );
 }
@@ -524,6 +563,65 @@ function ArchiveModal({ eventId, eventType, onClose, onDone }: {
       <button className="btn btn-primary" style={{ width: '100%' }} disabled={archive.isPending}
         onClick={() => archive.mutate()}>
         确认归档（校验资料完整性后写入安全档案）
+      </button>
+    </Modal>
+  );
+}
+
+function CreateInjuryModal({ eventId, defaultChildId, defaultAttrId, onClose, onDone }: {
+  eventId: number; defaultChildId?: number; defaultAttrId?: number | null;
+  onClose: () => void; onDone: (id: number) => void;
+}) {
+  const [f, setF] = useState({
+    injury_type: '擦伤', play_item: '', action_desc: '',
+    companion_position: '', first_aid: '', parent_demands: '',
+  });
+  const upd = (k: string, v: string) => setF({ ...f, [k]: v });
+  const create = useMutation({
+    mutationFn: () => api.createInjury(eventId, f),
+    onSuccess: (r) => onDone(r.id),
+  });
+  return (
+    <Modal title="发起受伤赔付协商（信息收集）" onClose={onClose} wide>
+      <div className="ok-box" style={{ background: 'var(--info-bg)', color: 'var(--info)' }}>
+        儿童擦伤或扭伤后，先收集完整信息，再由店长选择「医药费报销 / 课时补偿 / 继续观察」；
+        决策后会员卡权益与事故复盘会同步调整，并生成家长确认与员工复盘任务。
+      </div>
+      <div className="grid grid-2">
+        <Field label="伤情类型">
+          <select value={f.injury_type} onChange={(e) => upd('injury_type', e.target.value)}>
+            {INJURY_TYPES.map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </Field>
+        <Field label="项目 *">
+          <input value={f.play_item} onChange={(e) => upd('play_item', e.target.value)}
+            placeholder="受伤时正在玩的项目/环节，如：海洋球池边缘缓冲区" />
+        </Field>
+      </div>
+      <Field label="孩子当时的动作 *">
+        <input value={f.action_desc} onChange={(e) => upd('action_desc', e.target.value)}
+          placeholder="如：从池边跃入球池时右膝磕到池沿软包" />
+      </Field>
+      <Field label="陪同人位置 *">
+        <input value={f.companion_position} onChange={(e) => upd('companion_position', e.target.value)}
+          placeholder="如：母亲在休息区就座，立柱遮挡约 3 秒" />
+      </Field>
+      <div className="grid grid-2">
+        <Field label="急救处理 *">
+          <textarea value={f.first_aid} onChange={(e) => upd('first_aid', e.target.value)}
+            placeholder="如：医疗点清创，碘伏消毒+创可贴包扎，留观15分钟" />
+        </Field>
+        <Field label="家长诉求 *">
+          <textarea value={f.parent_demands} onChange={(e) => upd('parent_demands', e.target.value)}
+            placeholder="如：希望门店承担清创医药费并加强池沿看护" />
+        </Field>
+      </div>
+      <div className="small muted">默认关联本事件儿童{defaultChildId ? '' : '（事件未关联儿童）'}与项目，无需重复选择。</div>
+      <ErrorBox error={create.error} />
+      <button className="btn btn-primary" style={{ width: '100%' }}
+        disabled={Object.values(f).some((v) => !v.trim()) || create.isPending}
+        onClick={() => create.mutate()}>
+        创建协商单并进入处置
       </button>
     </Modal>
   );

@@ -10,6 +10,8 @@ import Patrol from './pages/Patrol';
 import Tickets from './pages/Tickets';
 import Events from './pages/Events';
 import EventDetail from './pages/EventDetail';
+import Injuries from './pages/Injuries';
+import InjuryDetail from './pages/InjuryDetail';
 import Parties from './pages/Parties';
 import Review from './pages/Review';
 
@@ -21,6 +23,7 @@ const NAV = [
   { to: '/patrol', label: '巡场记录', icon: '🧹' },
   { to: '/tickets', label: '设备临停分流', icon: '🛠️' },
   { to: '/events', label: '事件中心', icon: '🚨' },
+  { to: '/injuries', label: '受伤赔付协商', icon: '🤝' },
   { to: '/parties', label: '生日会 / 托管班', icon: '🎂' },
   { to: '/review', label: '安全复盘', icon: '🔍', roles: ['manager'] },
 ];
@@ -68,6 +71,8 @@ function Layout() {
             <Route path="/tickets" element={<Tickets />} />
             <Route path="/events" element={<Events />} />
             <Route path="/events/:id" element={<EventDetail />} />
+            <Route path="/injuries" element={<Injuries />} />
+            <Route path="/injuries/:id" element={<InjuryDetail />} />
             <Route path="/parties" element={<Parties />} />
             <Route path="/review" element={<Review />} />
             <Route path="*" element={<Navigate to="/" replace />} />

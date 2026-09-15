@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { Card, Chip, Empty, Loading } from '../components';
-import { EVENT_STATUS, EVENT_TYPES, fmtDT, parseJSON, ROLE_NAMES, SEVERITY } from '../util';
+import { EVENT_STATUS, EVENT_TYPES, fmtDT, MARKER_TYPES, parseJSON, ROLE_NAMES, SEVERITY } from '../util';
 import type { ArchiveData } from '../types';
 
 function Bars({ title, data, names }: { title: string; data: Record<string, number>; names?: Record<string, string> }) {
@@ -36,6 +36,7 @@ export default function Review() {
   });
 
   const stats = review.data?.stats;
+  const rd = review.data;
 
   return (
     <div>
@@ -78,6 +79,62 @@ export default function Review() {
               </table>
             </Card>
           </div>
+
+          {rd?.injury && rd.injury.total > 0 && (
+            <Card className="mt16" title="受伤赔付协商汇总（医药费报销 / 课时补偿 / 继续观察）">
+              <div className="row" style={{ gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                <div>
+                  <div className="stat-label">协商单</div>
+                  <div className="stat-value" style={{ fontSize: 26 }}>
+                    {rd.injury.total}<small> 单</small>
+                  </div>
+                  <div className="muted small">已决策 {rd.injury.decided} · 家长确认 {rd.injury.confirmed} · 已复盘 {rd.injury.reviewed}</div>
+                </div>
+                <div>
+                  <div className="stat-label">医药费报销合计</div>
+                  <div className="stat-value" style={{ fontSize: 26 }}>¥{rd.injury.medical_total.toFixed(2)}</div>
+                </div>
+                <div>
+                  <div className="stat-label">课时补偿合计</div>
+                  <div className="stat-value" style={{ fontSize: 26 }}>{rd.injury.class_total}<small> 节</small></div>
+                </div>
+                <div>
+                  <div className="stat-label">店长方案分布</div>
+                  <div className="row mt8">
+                    {Object.entries(rd.injury.byPlan).length === 0 && <span className="muted small">暂无</span>}
+                    {Object.entries(rd.injury.byPlan).map(([k, v]) => (
+                      <span key={k} className="tag tag-warn">{k} × {v}</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </Card>
+          )}
+
+          {rd?.markers && rd.markers.list.length > 0 && (
+            <Card className="mt16"
+              title={`复盘会标记（下一次巡场依据）· ${rd.markers.list.length} 项`}
+              extra={<span className="row">
+                {Object.entries(rd.markers.byType).map(([k, v]) => (
+                  <span key={k} className="tag">{k} × {v}</span>
+                ))}
+              </span>}>
+              <table className="table">
+                <thead><tr><th>类型</th><th>项目</th><th>隐患 / 整改</th><th>来源</th><th>标记人</th></tr></thead>
+                <tbody>
+                  {rd.markers.list.map((m) => (
+                    <tr key={m.id}>
+                      <td><Chip tone="warn">{MARKER_TYPES[m.marker_type]?.icon} {MARKER_TYPES[m.marker_type]?.label || m.marker_type}</Chip></td>
+                      <td>{m.attraction_name || '—'}</td>
+                      <td style={{ maxWidth: 380 }}>{m.content}{m.fix_action && <div className="small muted">🛠 {m.fix_action}</div>}</td>
+                      <td className="small muted">{m.injury_code}</td>
+                      <td className="small">{m.created_by_name}<div className="muted">{fmtDT(m.created_at)}</div></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+          )}
 
           <Card className="mt16" title={`事件档案明细（${review.data!.events.length} 件）`}>
             {review.data!.events.length === 0 && <Empty text="筛选条件下无事件" />}

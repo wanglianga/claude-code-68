@@ -234,3 +234,38 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .attr-grid, .patrol-grid, .grid-3 { grid-template-columns: repeat(2, 1fr); }
   .member-layout, .checkin-layout, .detail-layout { grid-template-columns: 1fr; }
 }
+
+/* ---------- 受伤赔付协商 ---------- */
+.alert-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.alert-bar .tag { padding: 7px 12px; font-size: 13px; }
+.alert-bar a { text-decoration: none; }
+
+.steps { display: flex; gap: 6px; flex-wrap: wrap; }
+.step { flex: 1; min-width: 110px; display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line);
+  color: var(--muted); font-size: 13px; }
+.step-no { width: 22px; height: 22px; border-radius: 50%; background: var(--line); color: var(--muted);
+  display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+.step.on { color: var(--text); border-color: var(--info); }
+.step.on .step-no { background: var(--info); color: #fff; }
+.step.cur { box-shadow: 0 0 0 2px color-mix(in srgb, var(--info) 30%, transparent); font-weight: 700; }
+
+.plan-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
+.plan-card { text-align: left; border: 1.5px solid var(--line); background: #fff; border-radius: 12px;
+  padding: 14px; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+.plan-card:hover { border-color: var(--info); }
+.plan-card.sel { border-color: var(--info); box-shadow: 0 0 0 2px color-mix(in srgb, var(--info) 25%, transparent); }
+.plan-card:disabled { cursor: not-allowed; opacity: .7; }
+.plan-ico { font-size: 22px; margin-bottom: 6px; }
+
+.marker-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.marker-col { border: 1px dashed var(--line); border-radius: 12px; padding: 10px; min-height: 90px; }
+.marker-col.has { border-style: solid; border-color: var(--ok); background: color-mix(in srgb, var(--ok-bg, #eafaf0) 55%, #fff); }
+.marker-head { display: flex; align-items: center; gap: 8px; font-weight: 700; margin-bottom: 8px; font-size: 13px; }
+.marker-col .info-block { margin-bottom: 8px; }
+
+.patrol-restricted { border-color: var(--bad); background: color-mix(in srgb, var(--bad-bg, #fdecec) 55%, #fff); }
+
+@media (max-width: 980px) {
+  .plan-grid, .marker-grid { grid-template-columns: 1fr; }
+}

@@ -1,6 +1,7 @@
 import type {
-  Attraction, Checkin, Child, EventDetail, EventItem, Member, Overview,
-  Party, PatrolLog, RecommendResult, ReviewResult, SearchAlertItem, StopTicket, TicketDetail, User,
+  Attraction, Checkin, Child, EventDetail, EventItem, InjuryCase, InjuryDetail,
+  Member, Overview, Party, PatrolLog, PatrolTask, RecommendResult, ReviewResult,
+  SearchAlertItem, StopTicket, TicketDetail, User,
 } from './types';
 
 const TOKEN_KEY = 'pg_token';
@@ -107,4 +108,29 @@ export const api = {
   addIssue: (ticketId: number, body: { type: string; title: string; detail: string }) =>
     post<{ ok: boolean }>(`/api/tickets/${ticketId}/issues`, body),
   doneIssue: (id: number) => post<{ ok: boolean }>(`/api/issues/${id}/done`),
+
+  // 受伤赔付协商
+  injuries: (status = '', attractionId = '') =>
+    get<InjuryCase[]>(`/api/injuries?status=${status}&attraction_id=${attractionId}`),
+  injury: (id: number) => get<InjuryDetail>(`/api/injuries/${id}`),
+  createInjury: (eventId: number, body: {
+    injury_type: string; play_item: string; action_desc: string;
+    companion_position: string; first_aid: string; parent_demands: string;
+    child_id?: number | null; attraction_id?: number | null;
+  }) => post<{ ok: boolean; id: number; code: string }>(`/api/events/${eventId}/injury-case`, body),
+  updateCollect: (id: number, body: Record<string, string>) =>
+    req<{ ok: boolean }>('PUT', `/api/injuries/${id}/collect`, body),
+  injuryDecision: (id: number, body: {
+    plan: string; plan_detail?: string; medical_fee?: number; class_sessions?: number;
+  }) => post<{ ok: boolean; benefit_applied: number }>(`/api/injuries/${id}/decision`, body),
+  parentConfirm: (id: number, confirmer: string) =>
+    post<{ ok: boolean }>(`/api/injuries/${id}/parent-confirm`, { confirmer }),
+  addMarker: (id: number, body: { marker_type: string; content: string; fix_action: string }) =>
+    post<{ ok: boolean; id: number }>(`/api/injuries/${id}/markers`, body),
+  completeReview: (id: number, control_rule?: string) =>
+    post<{ ok: boolean }>(`/api/injuries/${id}/complete-review`, { control_rule }),
+  clearControl: (id: number) => post<{ ok: boolean }>(`/api/injuries/${id}/clear-control`),
+  patrolTasks: (status = 'open') => get<PatrolTask[]>(`/api/patrol/tasks?status=${status}`),
+  donePatrolTask: (id: number, note: string) =>
+    post<{ ok: boolean }>(`/api/patrol/tasks/${id}/done`, { note }),
 };

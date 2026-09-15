@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { Card, Chip, Empty, ErrorBox, Loading } from '../components';
 import SearchAlert from '../components/SearchAlert';
@@ -25,6 +26,21 @@ export default function Overview() {
   return (
     <div>
       <SearchAlert />
+      {(data.restricted_attractions?.length || data.pending_injury_count) ? (
+        <div className="alert-bar mb16">
+          {!!data.restricted_attractions?.length && (
+            <span className="tag tag-bad">
+              ⛔ 限制开放：{data.restricted_attractions.map((a) => a.name).join('、')}
+              （受伤复盘整改中，不按原规则开放，见<Link to="/patrol">巡场复盘待办</Link>）
+            </span>
+          )}
+          {!!data.pending_injury_count && (
+            <Link className="tag tag-warn" to="/injuries">
+              🤝 {data.pending_injury_count} 张受伤赔付协商单待店长决策
+            </Link>
+          )}
+        </div>
+      ) : null}
       <div className="stat-grid">
         <div className="stat">
           <div className="stat-label">在场人数 / 当日限流</div>
@@ -61,7 +77,12 @@ export default function Overview() {
               const st = ATTR_STATUS[a.status];
               return (
                 <div className="attr-card" key={a.id}>
-                  <div className="attr-name">{a.name}<Chip tone={st.tone}>{st.label}</Chip></div>
+                  <div className="attr-name">{a.name}
+                    <span className="row">
+                      {a.control_status === 'restricted' && <Chip tone="bad">⛔ 限制</Chip>}
+                      <Chip tone={st.tone}>{st.label}</Chip>
+                    </span>
+                  </div>
                   <div className="attr-meta">
                     {a.is_facility ? '巡场区域' : `身高 ${a.min_height ?? 0}–${a.max_height ?? '不限'}cm · 容量 ${a.capacity} 人`}
                   </div>
@@ -69,6 +90,7 @@ export default function Overview() {
                     <>
                       <div className="attr-meta">当前 {occ} 人</div>
                       <div className="occ-bar"><div style={{ width: `${Math.min(100, (occ / a.capacity) * 100)}%` }} /></div>
+                      {a.control_status === 'restricted' && <div className="small" style={{ color: 'var(--bad)' }}>{a.control_rule}</div>}
                     </>
                   )}
                 </div>

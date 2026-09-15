@@ -216,7 +216,75 @@ CREATE TABLE IF NOT EXISTS rechecks (
   created_by_name TEXT,
   created_at TEXT NOT NULL
 );
+-- 受伤赔付协商（儿童擦伤/扭伤等）：信息收集 → 店长决策 → 会员卡权益/事故复盘同步 → 家长确认/员工复盘
+CREATE TABLE IF NOT EXISTS injury_cases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,             -- IC-20260915-0001
+  event_id INTEGER NOT NULL REFERENCES events(id),
+  child_id INTEGER REFERENCES children(id),
+  member_id INTEGER REFERENCES members(id),
+  attraction_id INTEGER REFERENCES attractions(id),
+  injury_type TEXT NOT NULL DEFAULT '',  -- 擦伤 | 扭伤 | 磕碰 | 其他
+  -- ① 页面收集
+  play_item TEXT NOT NULL DEFAULT '',    -- 项目（受伤时正在玩的项目/环节）
+  action_desc TEXT NOT NULL DEFAULT '',  -- 动作（孩子当时的动作）
+  companion_position TEXT NOT NULL DEFAULT '', -- 陪同人位置
+  first_aid TEXT NOT NULL DEFAULT '',    -- 急救处理
+  parent_demands TEXT NOT NULL DEFAULT '',     -- 家长诉求
+  -- ② 店长决策：medical_reimburse 医药费报销 | class_compensation 课时补偿 | continue_observation 继续观察
+  plan TEXT,
+  plan_detail TEXT NOT NULL DEFAULT '',
+  medical_fee REAL NOT NULL DEFAULT 0,   -- 报销医药费金额
+  class_sessions INTEGER NOT NULL DEFAULT 0, -- 课时补偿数量
+  benefit_applied INTEGER NOT NULL DEFAULT 0, -- 权益是否已写入会员卡
+  decided_by TEXT, decided_at TEXT,
+  -- ③ 家长确认
+  parent_confirmed INTEGER NOT NULL DEFAULT 0,
+  parent_confirmer TEXT, parent_confirmed_at TEXT,
+  -- ④ 员工复盘
+  reviewed INTEGER NOT NULL DEFAULT 0,
+  reviewed_by TEXT, reviewed_at TEXT,
+  created_by_id INTEGER, created_by_name TEXT,
+  created_at TEXT NOT NULL
+);
+-- 复盘会标记：项目动线 / 员工站位 / 家长视线盲区（作为下一次巡场依据）
+CREATE TABLE IF NOT EXISTS staff_review_markers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  injury_case_id INTEGER NOT NULL REFERENCES injury_cases(id),
+  event_id INTEGER REFERENCES events(id),
+  attraction_id INTEGER REFERENCES attractions(id),
+  marker_type TEXT NOT NULL,             -- route 项目动线 | positioning 员工站位 | blindspot 家长视线盲区
+  content TEXT NOT NULL,
+  fix_action TEXT NOT NULL DEFAULT '',   -- 整改/调整措施
+  created_by_name TEXT,
+  created_at TEXT NOT NULL
+);
+-- 协商结束后自动生成的任务：家长确认 / 员工复盘 / 复盘巡场待办
+CREATE TABLE IF NOT EXISTS staff_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,                    -- parent_confirm | staff_review | patrol_followup
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  ref_id INTEGER,                        -- 关联 injury_case / marker id
+  attraction_id INTEGER,
+  assignee_role TEXT NOT NULL DEFAULT '', -- manager | patrol
+  status TEXT NOT NULL DEFAULT 'open',   -- open | done
+  done_by TEXT, done_at TEXT,
+  created_at TEXT NOT NULL
+);
 `);
+
+// ---------- 轻量迁移：既有 SQLite 增加项目受伤管控列（防止同类项目继续按原规则开放） ----------
+for (const col of [
+  ['control_status', "TEXT NOT NULL DEFAULT 'open'"], // open 正常 | restricted 限制开放（受伤新规）
+  ['control_reason', 'TEXT'],
+  ['control_rule', 'TEXT'],        // 新规则（替代原开放规则）
+  ['control_case_id', 'INTEGER'],  // 来源受伤协商单
+  ['controlled_at', 'TEXT'],
+]) {
+  const exists = db.prepare('PRAGMA table_info(attractions)').all().some((c) => c.name === col[0]);
+  if (!exists) db.exec(`ALTER TABLE attractions ADD COLUMN ${col[0]} ${col[1]}`);
+}
 
 const nowIso = () => new Date().toISOString();
 // 种子数据的时间统一按 Asia/Shanghai（UTC+8）墙钟时间生成，与运行时展示口径一致
@@ -325,9 +393,12 @@ export function seedIfEmpty() {
     insGuardian.run(cXue, '张莉', '母亲', '13800001111', 1, 1);
     const gJian = insGuardian.run(cXue, '王建国', '父亲', '13800001112', 1, 1).lastInsertRowid;
 
-    // M1002 次卡家庭：刘洋（剩余 6 次，含设备临停补偿的 1 次）
-    const m2 = insMember.run('M1002', 'punch', '刘洋', '13800002222', 6,
-      JSON.stringify({ 剩余权益说明: '次卡按次扣减；含设备临停补偿1次' }),
+    // M1002 次卡家庭：刘洋（含设备临停补偿 1 次 + 滑梯扭伤课时补偿 2 次）
+    const m2 = insMember.run('M1002', 'punch', '刘洋', '13800002222', 8,
+      JSON.stringify({
+        剩余权益说明: '次卡按次扣减；含设备临停补偿1次、滑梯扭伤课时补偿共2节',
+        赔付记录: ['课时补偿 2 节（受伤赔付协商 IC 滑梯扭伤）'],
+      }),
       at(110, 23, 59), 'active', nowIso()).lastInsertRowid;
     const cTian = insChild.run(m2, '刘天天', '男', '2020-11-20', 98, '尘螨过敏', JSON.stringify([]), '').lastInsertRowid;
     const gYang = insGuardian.run(cTian, '刘洋', '父亲', '13800002222', 1, 1).lastInsertRowid;
@@ -410,6 +481,19 @@ export function seedIfEmpty() {
     insTL.run(ev1, 'disinfection', pt, '李强', 'patrol', '海洋球池摔倒点位局部消毒完成，消毒记录已登记',
       JSON.stringify({ area: '海洋球池' }), minutesAgo(8));
 
+    // IC1 收集中：张小雨擦伤的受伤赔付协商（信息已收集，待店长三选一决策）
+    const ic1 = db.prepare(`INSERT INTO injury_cases
+      (code, event_id, child_id, member_id, attraction_id, injury_type, play_item, action_desc, companion_position, first_aid, parent_demands, created_by_id, created_by_name, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      `IC-${dstr}-0001`, ev1, cYu, m1, 4, '擦伤', '海洋球池边缘缓冲区', '从池边跃入球池时右膝磕到池沿软包',
+      '母亲张莉在休息区就座（视线可及，但中间有立柱遮挡约 3 秒）',
+      '医疗点陈曦清创，碘伏消毒 + 创可贴包扎；留观 15 分钟无异常',
+      '母亲到场后表示不追究责任，希望门店承担清创医药费并加强池沿看护',
+      pt, '李强', minutesAgo(7)).lastInsertRowid;
+    insTL.run(ev1, 'communication', fd, '王芳', 'frontdesk',
+      `受伤信息已录入赔付协商单 IC-${dstr}-0001：项目/动作/陪同人位置/急救处理/家长诉求齐备，等待店长选择赔付方式`,
+      JSON.stringify({ injury_case_id: ic1 }), minutesAgo(6));
+
     // EV2 已归档：蹦床设备临停（含完整档案：照片/监控/签字/赔付/复检/权益调整）
     const ev2 = insEvent.run(`EV-${dstr}-0002`, 'equipment_stop', '蹦床运行异响，执行设备临停',
       '巡场发现蹦床弹簧区域异响，立即临停疏散并挂牌，无儿童受伤。',
@@ -474,6 +558,75 @@ export function seedIfEmpty() {
     insQueue.run(1, 3, null, 'S-01', 'waiting', null, minutesAgo(50)); // 滑梯正常排队（未受影响）
     insIssue.run(st2, 'party_delay', '「张小雨的5岁生日会」蹦床环节延误',
       '生日会 15:00 开始，蹦床环节预计延误 30 分钟，已通知家长调整流程', 'open', '周婷', minutesAgo(100));
+
+    // ---------- 历史受伤赔付协商：刘天天滑梯下梯口扭伤（已完成全流程，滑梯仍处限制开放） ----------
+    const ev4 = insEvent.run(`EV-${dstr}-0004`, 'fall', '刘天天在滑梯下梯口踩空，左脚踝轻微扭伤',
+      '刘天天从滑梯缓冲段跑向排队区时踩空台阶，左脚踝轻微扭伤肿胀，已完成赔付协商与员工复盘。',
+      cTian, m2, 1, 'medium', 'archived',
+      JSON.stringify({
+        photos: ['滑梯下梯口台阶照片.jpg', '脚踝冰敷照片.jpg'],
+        cctv: [{ camera: 'C-01', start: '10:32', end: '10:40', note: '踩空瞬间及处置过程已拷贝存档' }],
+        parent_signature: '父亲刘洋已在赔付协商单上签字确认课时补偿方案（IC-' + dstr + '-0002）',
+        compensation: '课时补偿 2 节（协商单 IC-' + dstr + '-0002 店长决策，已写入 M1002），无需医药费报销',
+        recheck: null,
+        benefit_adjustment: { add_sessions: 2, applied_to: 'M1002', note: '滑梯扭伤赔付协商：课时补偿 2 节' },
+        conclusions: { recheck: '本事件为儿童轻微扭伤，不涉及设备损坏，无需设备复检' },
+      }),
+      pt, '李强', minutesAgo(60 * 50), minutesAgo(60 * 47)).lastInsertRowid;
+    insTL.run(ev4, 'status', pt, '李强', 'patrol', '事件创建（儿童摔倒）：刘天天在滑梯下梯口踩空，左脚踝轻微扭伤', '{}', minutesAgo(60 * 50));
+    insTL.run(ev4, 'firstaid', md, '陈曦', 'medical', '急救箱#2 取用：冰袋×1、弹性绷带×1；制动冰敷 20 分钟，建议回家观察',
+      JSON.stringify({ kit: '急救箱#2', items: ['冰袋×1', '弹性绷带×1'] }), minutesAgo(60 * 50 + 4));
+    insTL.run(ev4, 'communication', fd, '王芳', 'frontdesk', '已电话联系父亲刘洋到场，说明伤情与急救处理，家长提出课时补偿诉求',
+      JSON.stringify({ to: '刘洋', channel: '电话' }), minutesAgo(60 * 49));
+
+    const ic2 = db.prepare(`INSERT INTO injury_cases
+      (code, event_id, child_id, member_id, attraction_id, injury_type, play_item, action_desc, companion_position, first_aid, parent_demands,
+       plan, plan_detail, class_sessions, benefit_applied, decided_by, decided_at,
+       parent_confirmed, parent_confirmer, parent_confirmed_at, reviewed, reviewed_by, reviewed_at,
+       created_by_id, created_by_name, created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      `IC-${dstr}-0002`, ev4, cTian, m2, 1, '扭伤', '滑梯缓冲段 → 下梯口台阶', '未停稳直接跑向排队区，踩空最后一级台阶',
+      '父亲刘洋当时在滑梯正面拍摄区，下梯口在其身后视线盲区',
+      '冰袋冰敷 20 分钟、弹性绷带制动；医疗点判定无需送医，回家观察 48 小时',
+      '父亲接受道歉，要求补偿课时 2 节并改造下梯口动线',
+      'class_compensation', '店长选择「课时补偿」：向次卡 M1002 补偿课时 2 节，已直接写入会员卡；事故复盘会同步纳入本周安全议题',
+      2, 1, '赵敏', minutesAgo(60 * 49),
+      1, '刘洋（父亲）', minutesAgo(60 * 48), 1, '赵敏', minutesAgo(60 * 47),
+      pt, '李强', minutesAgo(60 * 50 + 2)).lastInsertRowid;
+    insTL.run(ev4, 'settlement', mg, '赵敏', 'manager',
+      '店长决策（赔付协商）：课时补偿 2 节，已写入会员卡 M1002（剩余 4 → 6 节）；事故复盘会同步纳入本周议题',
+      JSON.stringify({ plan: 'class_compensation', class_sessions: 2, card_no: 'M1002' }), minutesAgo(60 * 49));
+    insTL.run(ev4, 'signature', fd, '王芳', 'frontdesk', '家长确认：父亲刘洋已签字确认课时补偿方案与伤情结论',
+      JSON.stringify({ confirmer: '刘洋（父亲）' }), minutesAgo(60 * 48));
+
+    const insMarker = db.prepare(`INSERT INTO staff_review_markers (injury_case_id, event_id, attraction_id, marker_type, content, fix_action, created_by_name, created_at)
+                                  VALUES (?,?,?,?,?,?,?,?)`);
+    const mk1 = insMarker.run(ic2, ev4, 1, 'route', '下梯口正对排队折返动线，儿童冲下滑梯后直接汇入排队人流，易踩空/碰撞',
+      '用软包隔离栏把下梯口动线右移 1.5 米，与排队区物理分流', '赵敏', minutesAgo(60 * 47)).lastInsertRowid;
+    const mk2 = insMarker.run(ic2, ev4, 1, 'positioning', '事发时巡场固定在滑梯顶部，下梯口无人站位，存在约 8 秒看护真空',
+      '高峰时段增设下梯口定点岗（1 名巡场/前台支援），负责缓冲段减速提醒', '赵敏', minutesAgo(60 * 47)).lastInsertRowid;
+    const mk3 = insMarker.run(ic2, ev4, 1, 'blindspot', '家长拍摄区位于滑梯正面，下梯口在家长身后，属于家长视线盲区',
+      '地面张贴「请看护至孩子下梯」提示，并把家长等候线划到能同时看到梯口的位置', '赵敏', minutesAgo(60 * 47)).lastInsertRowid;
+    insTL.run(ev4, 'review', mg, '赵敏', 'manager',
+      `员工复盘会完成，标记 3 项（作为下一次巡场依据）：动线—${'下梯口与排队区动线交叉'}；站位—下梯口看护真空；盲区—家长拍摄区看不到下梯口`,
+      JSON.stringify({ markers: [mk1, mk2, mk3] }), minutesAgo(60 * 47));
+
+    // 复盘结论：滑梯在巡场确认整改完成前「限制开放」（不再按原规则开放）
+    db.prepare(`UPDATE attractions SET control_status='restricted',
+      control_reason=?, control_rule=?, control_case_id=?, controlled_at=? WHERE id=1`)
+      .run(`受伤复盘（${'IC-' + dstr + '-0002'} 刘天天扭伤）：下梯口动线/看护/盲区待整改`,
+        '限制开放：下梯口限 1 人通过、巡场定点看护；完成 3 项复盘巡场待办并经店长确认前不恢复原规则',
+        ic2, minutesAgo(60 * 47));
+    insTL.run(ev4, 'status', mg, '赵敏', 'manager', '复盘会决议：滑梯改为限制开放（新规则），3 项整改生成巡场待办，下次巡场逐项核验', '{}', minutesAgo(60 * 47));
+
+    // 协商结束生成的任务：历史两张（家长确认/员工复盘）已完成；3 张复盘巡场待办仍 open（下一次巡场依据）
+    const insTask = db.prepare(`INSERT INTO staff_tasks (type, title, detail, ref_id, attraction_id, assignee_role, status, done_by, done_at, created_at)
+                                VALUES (?,?,?,?,?,?,?,?,?,?)`);
+    insTask.run('parent_confirm', '家长确认赔付方案（刘天天滑梯扭伤）', '请父亲刘洋到场确认课时补偿 2 节并签字', ic2, 1, 'manager', 'done', '王芳', minutesAgo(60 * 48), minutesAgo(60 * 49));
+    insTask.run('staff_review', '组织员工复盘会（刘天天滑梯扭伤）', '复盘项目动线、员工站位、家长视线盲区并形成标记', ic2, 1, 'manager', 'done', '赵敏', minutesAgo(60 * 47), minutesAgo(60 * 49));
+    insTask.run('patrol_followup', '巡场核验：下梯口动线软包隔离改造', '将下梯口动线右移 1.5 米并与排队区分流，核验后拍照登记', mk1, 1, 'patrol', 'open', null, null, minutesAgo(60 * 47));
+    insTask.run('patrol_followup', '巡场核验：高峰下梯口定点岗站位', '高峰时段安排下梯口定点岗并落实减速提醒', mk2, 1, 'patrol', 'open', null, null, minutesAgo(60 * 47));
+    insTask.run('patrol_followup', '巡场核验：家长视线盲区提示与等候线', '张贴下梯看护提示，重划可同时看到梯口的家长等候线', mk3, 1, 'patrol', 'open', null, null, minutesAgo(60 * 47));
   });
   tx();
   console.log('[seed] 演示数据已初始化');

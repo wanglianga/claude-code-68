@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 import { Card, Chip, ErrorBox, Field, Loading, Modal, OkBox } from '../components';
-import { ATTR_STATUS, fmtDT, PATROL_STATUS } from '../util';
+import { ATTR_STATUS, fmtDT, MARKER_TYPES, PATROL_STATUS } from '../util';
 
 export default function Patrol() {
   const { user } = useAuth();
@@ -12,6 +12,7 @@ export default function Patrol() {
   const canEdit = user && ['patrol', 'manager'].includes(user.role);
   const { data, isLoading } = useQuery({ queryKey: ['attractions'], queryFn: api.attractions });
   const logs = useQuery({ queryKey: ['patrolLogs'], queryFn: api.patrolLogs });
+  const followups = useQuery({ queryKey: ['patrolTasks', 'open'], queryFn: () => api.patrolTasks('open') });
 
   const [area, setArea] = useState('滑梯');
   const [status, setStatus] = useState('正常');
@@ -49,6 +50,13 @@ export default function Patrol() {
   const reopen = useMutation({
     mutationFn: (id: number) => api.reopenAttraction(id),
     onSuccess: () => qc.invalidateQueries(),
+  });
+
+  // 复盘巡场待办核验（动线/站位/盲区整改，完成后由店长解除限制开放）
+  const [taskNote, setTaskNote] = useState<Record<number, string>>({});
+  const doneTask = useMutation({
+    mutationFn: (id: number) => api.donePatrolTask(id, taskNote[id] || ''),
+    onSuccess: () => { setTaskNote({}); qc.invalidateQueries(); },
   });
 
   if (isLoading) return <Loading />;
@@ -96,12 +104,18 @@ export default function Patrol() {
           <div className="patrol-grid">
             {data?.attractions.filter((a) => !a.is_facility).map((a) => {
               const st = ATTR_STATUS[a.status];
+              const restricted = a.control_status === 'restricted';
               return (
-                <div className="patrol-card" key={a.id}>
+                <div className={`patrol-card ${restricted ? 'patrol-restricted' : ''}`} key={a.id}>
                   <div className="row spread">
-                    <b>{a.name}</b><Chip tone={st.tone}>{st.label}</Chip>
+                    <b>{a.name}</b>
+                    <span className="row">
+                      {restricted && <Chip tone="bad">⛔ 限制开放</Chip>}
+                      <Chip tone={st.tone}>{st.label}</Chip>
+                    </span>
                   </div>
                   <div className="muted small mt8">当前 {data.occupancy[a.name] || 0}/{a.capacity} 人</div>
+                  {restricted && <div className="small mt8" style={{ color: 'var(--bad)' }}>{a.control_rule}</div>}
                   <div className="row mt8">
                     {a.status === 'open' && (
                       <>
@@ -127,6 +141,39 @@ export default function Patrol() {
           )}
         </Card>
       </div>
+
+      <Card className="mt16"
+        title={`复盘巡场待办 · 下一次巡场依据（${followups.data?.length || 0} 项待核验）`}
+        extra={<Link className="btn btn-sm" to="/injuries">查看受伤赔付协商</Link>}>
+        {!followups.data?.length ? (
+          <div className="small muted">暂无待核验的复盘整改项。受伤复盘会标记的项目动线、员工站位、家长视线盲区整改会自动汇总到这里。</div>
+        ) : (
+          <table className="table">
+            <thead><tr><th>项目</th><th>类型</th><th>待办 / 整改要求</th><th>来源</th><th>核验记录</th><th></th></tr></thead>
+            <tbody>
+              {followups.data.map((t) => (
+                <tr key={t.id}>
+                  <td><b>{t.attraction_name || '全场'}</b></td>
+                  <td><Chip tone="warn">{MARKER_TYPES[t.marker_type ?? '']?.icon || '•'} {MARKER_TYPES[t.marker_type ?? '']?.label || t.marker_type}</Chip></td>
+                  <td style={{ maxWidth: 320 }}>{t.title}<div className="muted small">{t.detail}</div></td>
+                  <td className="small muted">{t.injury_code}{t.child_name ? ` · ${t.child_name}` : ''}</td>
+                  <td>
+                    <input style={{ width: 200 }} placeholder="现场核验情况/照片编号"
+                      value={taskNote[t.id] || ''} disabled={!canEdit}
+                      onChange={(e) => setTaskNote({ ...taskNote, [t.id]: e.target.value })} />
+                  </td>
+                  <td>
+                    <button className="btn btn-sm btn-primary" disabled={!canEdit || doneTask.isPending}
+                      onClick={() => doneTask.mutate(t.id)}>核验完成</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <ErrorBox error={doneTask.error} />
+        <div className="small muted mt8">全部待办核验完成后，由店长在「受伤赔付协商」单确认解除限制开放，项目恢复按原规则开放。</div>
+      </Card>
 
       {stopTarget && (
         <Modal title={`${stopTarget.name} · 发起${stopTarget.status === 'maintenance' ? '临停（维护中）' : '急停'}`}

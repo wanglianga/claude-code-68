@@ -64,7 +64,52 @@ function addTimeline(eventId, kind, user, content, meta = {}) {
 }
 
 const EVENT_TYPES = { fall: '儿童摔倒', push: '被推搡冲突', equipment_stop: '设备临停', lost_child: '走失寻人', card_dispute: '会员卡争议', refund: '退课/退费申请' };
-const TIMELINE_KINDS = ['status', 'communication', 'wristband', 'cctv', 'firstaid', 'disinfection', 'compensation', 'handover', 'photo', 'signature', 'recheck', 'benefit', 'note', 'search', 'found'];
+const TIMELINE_KINDS = ['status', 'communication', 'wristband', 'cctv', 'firstaid', 'disinfection', 'compensation', 'handover', 'photo', 'signature', 'recheck', 'benefit', 'note', 'search', 'found', 'settlement', 'review'];
+
+// ---------- 受伤赔付协商 ----------
+const INJURY_PLANS = {
+  medical_reimburse: '医药费报销',
+  class_compensation: '课时补偿',
+  continue_observation: '继续观察',
+};
+const MARKER_TYPES = { route: '项目动线', positioning: '员工站位', blindspot: '家长视线盲区' };
+const TASK_LABELS = { parent_confirm: '家长确认', staff_review: '员工复盘', patrol_followup: '复盘巡场待办' };
+
+const getInjuryCase = (id) => db.prepare('SELECT * FROM injury_cases WHERE id=?').get(id);
+const injuryCaseByEvent = (eventId) =>
+  db.prepare('SELECT * FROM injury_cases WHERE event_id=? ORDER BY id DESC LIMIT 1').get(eventId);
+const openTaskCount = (type, refId) =>
+  db.prepare("SELECT COUNT(*) c FROM staff_tasks WHERE type=? AND ref_id=? AND status='open'").get(type, refId).c;
+
+/**
+ * 店长决策落地到会员卡：
+ * - 课时补偿：次卡直接加次数，会员卡写入权益说明；
+ * - 医药费报销 / 继续观察：不改计次权益，仅在会员卡 benefits 留赔付记录（便于档案追溯）。
+ */
+function applyInjuryBenefit(memberId, plan, classSessions, medicalFee) {
+  const m = getMember(memberId);
+  if (!m) return null;
+  const benefits = parse(m.benefits, {});
+  const records = Array.isArray(benefits['赔付记录']) ? benefits['赔付记录'] : [];
+  let applied = 0;
+  if (plan === 'class_compensation' && classSessions > 0) {
+    if (m.type === 'punch') {
+      db.prepare('UPDATE members SET remaining_sessions = remaining_sessions + ? WHERE id=?').run(classSessions, m.id);
+    }
+    records.push(`课时补偿 ${classSessions} 节（受伤赔付协商）`);
+    const total = records.filter((r) => r.startsWith('课时补偿')).reduce((n, r) => n + (Number(r.match(/(\d+)\s*节/)?.[1]) || 0), 0);
+    benefits['赔付记录'] = records;
+    benefits['剩余权益说明'] = m.type === 'punch'
+      ? `次卡按次扣减；含受伤赔付课时补偿共 ${total} 节`
+      : `${benefits['剩余权益说明'] ? benefits['剩余权益说明'] + '；' : ''}含受伤赔付课时补偿共 ${total} 节`;
+    applied = 1;
+  } else if (plan === 'medical_reimburse' && medicalFee > 0) {
+    records.push(`医药费报销 ${Number(medicalFee).toFixed(2)} 元（受伤赔付协商）`);
+    benefits['赔付记录'] = records;
+  }
+  if (records.length) db.prepare('UPDATE members SET benefits=? WHERE id=?').run(JSON.stringify(benefits), m.id);
+  return { card_no: m.card_no, benefits, applied };
+}
 
 // 进行中走失寻人事件：child_id → 事件编号（用于出园冻结与风险提示）
 const lostChildMap = () => {
@@ -110,6 +155,9 @@ app.get('/api/overview', auth, (req, res) => {
     WHERE ci.status='inside' ORDER BY ci.checkin_at DESC`).all()
     .map((c) => ({ ...c, lost_frozen: lostChildMap().has(c.child_id) ? 1 : 0, lost_event_code: lostChildMap().get(c.child_id) || null }));
   const patrol = db.prepare('SELECT * FROM patrol_logs ORDER BY created_at DESC LIMIT 6').all();
+  const restricted = db.prepare("SELECT id, name, control_reason, control_rule FROM attractions WHERE is_facility=0 AND control_status='restricted'").all();
+  const pendingInjuries = db.prepare('SELECT COUNT(*) c FROM injury_cases WHERE plan IS NULL').get().c;
+  const openPatrolTasks = db.prepare("SELECT COUNT(*) c FROM staff_tasks WHERE type='patrol_followup' AND status='open'").get().c;
   res.json({
     inside_count: insideCount(),
     daily_limit: dailyLimit(),
@@ -120,6 +168,9 @@ app.get('/api/overview', auth, (req, res) => {
     today_parties: parties,
     active_checkins: active,
     recent_patrol: patrol,
+    restricted_attractions: restricted,
+    pending_injury_count: pendingInjuries,
+    open_patrol_task_count: openPatrolTasks,
   });
 });
 
@@ -256,6 +307,10 @@ app.post('/api/wristbands/scan', auth, (req, res) => {
   // 避免孩子回到已停用项目
   const stopped = db.prepare("SELECT * FROM attractions WHERE name=? AND is_facility=0 AND status IN ('maintenance','emergency_stop')").get(zone);
   if (stopped) return res.status(400).json({ error: `${zone}已临停，禁止进入；请按临停处理单分流到可替代项目` });
+  // 受伤复盘限制开放：整改巡场待办完成前，不得按原规则扫码进入
+  const restricted = db.prepare("SELECT * FROM attractions WHERE name=? AND is_facility=0 AND control_status='restricted'").get(zone);
+  if (restricted)
+    return res.status(400).json({ error: `${zone}正按受伤复盘新规「限制开放」（${restricted.control_rule || '待整改'}），手环暂不可进入，请先完成复盘巡场待办并经店长确认` });
   db.prepare(`INSERT INTO wristband_locations (wristband_no, zone, updated_at) VALUES (?,?,?)
               ON CONFLICT(wristband_no) DO UPDATE SET zone=excluded.zone, updated_at=excluded.updated_at`)
     .run(wristband_no, zone, nowIso());
@@ -297,7 +352,7 @@ app.get('/api/tickets/:id', auth, (req, res) => {
   const rechecks = db.prepare('SELECT * FROM rechecks WHERE ticket_id=? ORDER BY id DESC').all(t.id);
   // 可替代项目：开放中、非本项目，且至少适合一名受影响儿童（身高+禁玩）
   const occ = occupancy();
-  const openAttrs = db.prepare("SELECT * FROM attractions WHERE is_facility=0 AND status='open' AND id != ?").all(t.attraction_id);
+  const openAttrs = db.prepare("SELECT * FROM attractions WHERE is_facility=0 AND status='open' AND control_status='open' AND id != ?").all(t.attraction_id);
   const alternatives = openAttrs.map((a) => {
     const suitable = affected.filter((ac) => {
       const c = getChild(ac.child_id);
@@ -328,6 +383,8 @@ app.post('/api/tickets/:id/divert', auth, requireRole('frontdesk', 'manager'), (
   if (!target) return res.status(400).json({ error: '分流去向项目不存在' });
   if (target.id === t.attraction_id) return res.status(400).json({ error: '不能分流回已停用项目' });
   if (target.status !== 'open') return res.status(400).json({ error: `${target.name} 当前未开放，不可作为分流去向` });
+  if (target.control_status === 'restricted')
+    return res.status(400).json({ error: `${target.name} 正按受伤复盘新规限制开放，不可作为分流去向` });
   db.prepare("UPDATE queue_entries SET status='transferred', transferred_to=? WHERE id=?").run(target.name, q.id);
   res.json({ ok: true });
 });
@@ -512,6 +569,10 @@ app.get('/api/recommendations/:childId', auth, (req, res) => {
   for (const a of attrs) {
     if (banned.includes(a.key)) { blocked.push({ attraction: a, reasons: ['已列入该儿童禁玩项目（家长登记）'] }); continue; }
     if (a.status !== 'open') { blocked.push({ attraction: a, reasons: [`设备当前状态：${statusText[a.status]}`] }); continue; }
+    if (a.control_status === 'restricted') {
+      blocked.push({ attraction: a, reasons: [`受伤复盘限制开放：${a.control_rule || '该项目复盘整改未完成，暂不按原规则开放'}（${a.control_reason || ''}）`] });
+      continue;
+    }
     if (a.min_height != null && child.height_cm < a.min_height) { blocked.push({ attraction: a, reasons: [`身高 ${child.height_cm}cm 低于最低要求 ${a.min_height}cm`] }); continue; }
     if (a.max_height != null && child.height_cm > a.max_height) { blocked.push({ attraction: a, reasons: [`身高 ${child.height_cm}cm 超过上限 ${a.max_height}cm`] }); continue; }
     const count = occ[a.key] || 0;
@@ -618,7 +679,15 @@ app.get('/api/events/:id', auth, (req, res) => {
     search_task = db.prepare('SELECT * FROM search_tasks WHERE event_id=? ORDER BY id DESC LIMIT 1').get(e.id) || null;
     found_report = db.prepare('SELECT * FROM found_reports WHERE event_id=? ORDER BY id DESC LIMIT 1').get(e.id) || null;
   }
-  res.json({ event: e, timeline, child, member, guardians, parties, search_task, found_report });
+  const injury_case = injuryCaseByEvent(e.id);
+  res.json({
+    event: e, timeline, child, member, guardians, parties, search_task, found_report,
+    injury_case: injury_case ? {
+      id: injury_case.id, code: injury_case.code, plan: injury_case.plan,
+      plan_label: injury_case.plan ? INJURY_PLANS[injury_case.plan] : null,
+      parent_confirmed: injury_case.parent_confirmed, reviewed: injury_case.reviewed,
+    } : null,
+  });
 });
 
 // 走失查找任务：按最新信息重新生成
@@ -748,6 +817,25 @@ app.post('/api/events/:id/archive', auth, requireRole('manager'), (req, res) => 
   const rules = ARCHIVE_RULES[e.type] || {};
   const typeLabel = EVENT_TYPES[e.type] || e.type;
 
+  // 受伤赔付协商：家长确认是归档前置条件；协商结论自动带入档案（不重复加次）
+  const injury = injuryCaseByEvent(e.id);
+  if (injury && injury.plan && !injury.parent_confirmed)
+    return res.status(400).json({ error: `该事件存在受伤赔付协商单 ${injury.code}，须先完成家长确认（签字）后才能归档` });
+  const injuryPlanText = injury && injury.plan
+    ? `${INJURY_PLANS[injury.plan]}（协商单 ${injury.code}）：` +
+      (injury.plan === 'medical_reimburse' ? `报销医药费 ${Number(injury.medical_fee).toFixed(2)} 元`
+        : injury.plan === 'class_compensation' ? `课时补偿 ${injury.class_sessions} 节${injury.benefit_applied ? '，已直接写入会员卡' : ''}`
+        : '继续观察，暂不产生赔付') + (injury.plan_detail ? `；${injury.plan_detail}` : '')
+    : '';
+  if (injury && injury.plan) {
+    if (!String(body.compensation || '').trim()) body.compensation = injuryPlanText;
+    if (!String(body.parent_signature || '').trim() && injury.parent_confirmed)
+      body.parent_signature = `家长 ${injury.parent_confirmer} 已在赔付协商单 ${injury.code} 上确认签字`;
+    // 课时补偿在店长决策时已写入会员卡，归档不再重复加次，仅保留说明
+    if (injury.benefit_applied)
+      body.benefit_adjustment = { add_sessions: 0, note: `课时补偿 ${injury.class_sessions} 节已在协商单 ${injury.code} 决策时写入会员卡，归档不重复发放` };
+  }
+
   const materials = {
     photos: (Array.isArray(body.photos) ? body.photos : []).map((s) => String(s).trim()).filter(Boolean),
     cctv: (Array.isArray(body.cctv) ? body.cctv : []).filter((c) => c && (c.camera || c.start || c.end || c.note)),
@@ -810,6 +898,309 @@ app.post('/api/events/:id/archive', auth, requireRole('manager'), (req, res) => 
   res.json({ ok: true });
 });
 
+// ---------------- 受伤赔付协商 ----------------
+function loadInjuryCase(id) {
+  const c = db.prepare(`
+    SELECT ic.*, e.code AS event_code, e.status AS event_status, e.type AS event_type,
+           ch.name AS child_name, ch.height_cm, m.card_no, m.type AS card_type,
+           m.remaining_sessions, m.benefits AS card_benefits,
+           a.name AS attraction_name, a.control_status, a.control_rule
+    FROM injury_cases ic
+    JOIN events e ON e.id = ic.event_id
+    LEFT JOIN children ch ON ch.id = ic.child_id
+    LEFT JOIN members m ON m.id = ic.member_id
+    LEFT JOIN attractions a ON a.id = ic.attraction_id
+    WHERE ic.id=?`).get(id);
+  if (!c) return null;
+  c.markers = db.prepare('SELECT * FROM staff_review_markers WHERE injury_case_id=? ORDER BY id').all(id);
+  c.tasks = db.prepare('SELECT * FROM staff_tasks WHERE ref_id=? AND type != ? ORDER BY id').all(id, 'patrol_followup');
+  const markerIds = c.markers.map((m) => m.id);
+  c.patrol_tasks = markerIds.length
+    ? db.prepare(`
+      SELECT st.*, m.marker_type, a.name AS attraction_name FROM staff_tasks st
+      LEFT JOIN staff_review_markers m ON m.id = st.ref_id
+      LEFT JOIN attractions a ON a.id = st.attraction_id
+      WHERE st.type='patrol_followup' AND st.ref_id IN (${markerIds.map(() => '?').join(',')})
+      ORDER BY st.id`).all(...markerIds)
+    : [];
+  return c;
+}
+
+// 协商单列表（可按状态/项目筛选），附带待办计数
+app.get('/api/injuries', auth, (req, res) => {
+  const { status, attraction_id } = req.query;
+  let sql = `
+    SELECT ic.*, e.code AS event_code, e.status AS event_status,
+           ch.name AS child_name, m.card_no, a.name AS attraction_name
+    FROM injury_cases ic
+    JOIN events e ON e.id = ic.event_id
+    LEFT JOIN children ch ON ch.id = ic.child_id
+    LEFT JOIN members m ON m.id = ic.member_id
+    LEFT JOIN attractions a ON a.id = ic.attraction_id
+    WHERE 1=1`;
+  const args = [];
+  if (status === 'collecting') sql += ' AND ic.plan IS NULL';
+  else if (status === 'decided') sql += ' AND ic.plan IS NOT NULL AND (ic.parent_confirmed=0 OR ic.reviewed=0)';
+  else if (status === 'done') sql += ' AND ic.plan IS NOT NULL AND ic.parent_confirmed=1 AND ic.reviewed=1';
+  if (attraction_id) { sql += ' AND ic.attraction_id=?'; args.push(Number(attraction_id)); }
+  sql += ' ORDER BY ic.id DESC';
+  const rows = db.prepare(sql).all(...args).map((c) => ({
+    ...c,
+    plan_label: c.plan ? INJURY_PLANS[c.plan] : null,
+    open_parent_task: openTaskCount('parent_confirm', c.id),
+    open_review_task: openTaskCount('staff_review', c.id),
+  }));
+  res.json(rows);
+});
+
+app.get('/api/injuries/:id', auth, (req, res) => {
+  const c = loadInjuryCase(req.params.id);
+  if (!c) return res.status(404).json({ error: '协商单不存在' });
+  res.json({
+    injury_case: c,
+    plan_options: INJURY_PLANS,
+    marker_types: MARKER_TYPES,
+  });
+});
+
+// 事件详情：若存在受伤协商单一并返回（前端在事件页直接入口）
+app.get('/api/events/:id/injury-case', auth, (req, res) => {
+  const e = db.prepare('SELECT id FROM events WHERE id=?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: '事件不存在' });
+  const c = injuryCaseByEvent(e.id);
+  res.json({ injury_case: c ? loadInjuryCase(c.id) : null });
+});
+
+// 新建协商单（擦伤/扭伤后录入），同时挂到事件线
+app.post('/api/events/:id/injury-case', auth, (req, res) => {
+  const e = db.prepare('SELECT * FROM events WHERE id=?').get(req.params.id);
+  if (!e) return res.status(404).json({ error: '事件不存在' });
+  if (e.status === 'archived') return res.status(400).json({ error: '事件已归档，不能新增协商单' });
+  if (injuryCaseByEvent(e.id)) return res.status(400).json({ error: '该事件已存在受伤赔付协商单，请勿重复创建' });
+  const b = req.body || {};
+  if (!b.injury_type || !b.play_item || !b.action_desc || !b.companion_position || !b.first_aid || !b.parent_demands)
+    return res.status(400).json({ error: '伤情类型、项目、动作、陪同人位置、急救处理、家长诉求均为必填' });
+  const child = b.child_id ? getChild(b.child_id) : (e.child_id ? getChild(e.child_id) : null);
+  const memberId = child ? child.member_id : e.member_id;
+  const attractionId = b.attraction_id || e.attraction_id || null;
+
+  const dstr = cnDay().replace(/-/g, '');
+  const seq = db.prepare("SELECT COUNT(*) c FROM injury_cases WHERE code LIKE ?").get(`IC-${dstr}-%`).c + 1;
+  const code = `IC-${dstr}-${String(seq).padStart(4, '0')}`;
+  const info = db.prepare(`INSERT INTO injury_cases
+    (code, event_id, child_id, member_id, attraction_id, injury_type, play_item, action_desc, companion_position, first_aid, parent_demands, created_by_id, created_by_name, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(code, e.id, child ? child.id : null, memberId, attractionId,
+      String(b.injury_type).trim(), String(b.play_item).trim(), String(b.action_desc).trim(),
+      String(b.companion_position).trim(), String(b.first_aid).trim(), String(b.parent_demands).trim(),
+      req.user.id, req.user.name, nowIso());
+  const id = info.lastInsertRowid;
+  addTimeline(e.id, 'note', req.user,
+    `受伤赔付协商单 ${code} 已创建：${b.injury_type}｜项目：${b.play_item}｜动作：${b.action_desc}｜陪同人位置：${b.companion_position}｜急救：${b.first_aid}｜家长诉求：${b.parent_demands}`,
+    { injury_case_id: id });
+  res.json({ ok: true, id, code });
+});
+
+// 补充/修订信息收集（店长决策前均可改）
+app.put('/api/injuries/:id/collect', auth, (req, res) => {
+  const c = getInjuryCase(req.params.id);
+  if (!c) return res.status(404).json({ error: '协商单不存在' });
+  if (c.plan) return res.status(400).json({ error: '店长已决策，收集信息锁定；如需变更请重新协商' });
+  const b = req.body || {};
+  for (const f of ['injury_type', 'play_item', 'action_desc', 'companion_position', 'first_aid', 'parent_demands']) {
+    if (b[f] !== undefined && String(b[f]).trim() === '')
+      return res.status(400).json({ error: '收集项不能为空' });
+  }
+  const fields = ['injury_type', 'play_item', 'action_desc', 'companion_position', 'first_aid', 'parent_demands'];
+  const sets = [], args = [];
+  for (const f of fields) if (b[f] !== undefined) { sets.push(`${f}=?`); args.push(String(b[f]).trim()); }
+  if (sets.length) { args.push(c.id); db.prepare(`UPDATE injury_cases SET ${sets.join(',')} WHERE id=?`).run(...args); }
+  addTimeline(c.event_id, 'note', req.user, `协商单 ${c.code} 信息收集已补充/修订`);
+  res.json({ ok: true });
+});
+
+// 店长选择赔付方式：医药费报销 / 课时补偿 / 继续观察 → 会员卡权益与事故复盘同步调整
+app.post('/api/injuries/:id/decision', auth, requireRole('manager'), (req, res) => {
+  const c = getInjuryCase(req.params.id);
+  if (!c) return res.status(404).json({ error: '协商单不存在' });
+  if (c.plan) return res.status(400).json({ error: '该协商单已完成店长决策' });
+  const { plan, plan_detail = '', medical_fee = 0, class_sessions = 0 } = req.body || {};
+  if (!INJURY_PLANS[plan]) return res.status(400).json({ error: '赔付方式须为医药费报销 / 课时补偿 / 继续观察' });
+  const fee = Number(medical_fee) || 0;
+  const sessions = parseInt(class_sessions, 10) || 0;
+  if (plan === 'medical_reimburse' && !(fee > 0)) return res.status(400).json({ error: '医药费报销须填写报销金额' });
+  if (plan === 'class_compensation' && !(sessions > 0)) return res.status(400).json({ error: '课时补偿须填写补偿课时数' });
+  if (!c.child_id && plan === 'class_compensation') return res.status(400).json({ error: '未关联会员儿童，无法做课时补偿' });
+
+  const tx = db.transaction(() => {
+    let appliedResult = null;
+    if (c.member_id && plan !== 'continue_observation') {
+      appliedResult = applyInjuryBenefit(c.member_id, plan, sessions, fee);
+    }
+    db.prepare(`UPDATE injury_cases SET plan=?, plan_detail=?, medical_fee=?, class_sessions=?, benefit_applied=?, decided_by=?, decided_at=? WHERE id=?`)
+      .run(plan, String(plan_detail).trim(), fee, sessions, appliedResult?.applied ? 1 : 0, req.user.name, nowIso(), c.id);
+
+    // 生成「家长确认」与「员工复盘」任务
+    const childName = c.child_id ? getChild(c.child_id)?.name : '受伤儿童';
+    db.prepare(`INSERT INTO staff_tasks (type, title, detail, ref_id, attraction_id, assignee_role, status, created_at)
+                VALUES (?,?,?,?,?,?,'open',?)`)
+      .run('parent_confirm', `家长确认赔付方案（${childName} ${c.code}）`,
+        `店长已选择「${INJURY_PLANS[plan]}」，请联系家长到场确认伤情结论与赔付方案并签字`, c.id, c.attraction_id, 'manager', nowIso());
+    db.prepare(`INSERT INTO staff_tasks (type, title, detail, ref_id, attraction_id, assignee_role, status, created_at)
+                VALUES (?,?,?,?,?,?,'open',?)`)
+      .run('staff_review', `组织员工复盘会（${childName} ${c.code}）`,
+        '复盘会标记项目动线、员工站位、家长视线盲区，形成下一次巡场依据', c.id, c.attraction_id, 'manager', nowIso());
+
+    // 事件线同步
+    const planDesc = plan === 'medical_reimburse' ? `报销医药费 ${fee.toFixed(2)} 元`
+      : plan === 'class_compensation' ? `课时补偿 ${sessions} 节（已写入会员卡 ${appliedResult?.card_no || ''}）`
+      : '继续观察（暂不产生赔付，持续跟踪孩子状态）';
+    addTimeline(c.event_id, 'settlement', req.user,
+      `店长决策（赔付协商 ${c.code}）：${INJURY_PLANS[plan]}—${planDesc}${plan_detail ? `；${plan_detail}` : ''}。会员卡权益${plan === 'class_compensation' ? '已同步调整' : '已登记赔付记录'}，事故复盘会同步纳入议程。`,
+      { plan, medical_fee: fee, class_sessions: sessions, benefit_applied: appliedResult?.applied ? 1 : 0 });
+    return appliedResult;
+  });
+  const appliedResult = tx();
+  res.json({ ok: true, benefit_applied: appliedResult?.applied ? 1 : 0 });
+});
+
+// 家长确认（店长/前台代登记签字确认）
+app.post('/api/injuries/:id/parent-confirm', auth, requireRole('manager', 'frontdesk'), (req, res) => {
+  const c = getInjuryCase(req.params.id);
+  if (!c) return res.status(404).json({ error: '协商单不存在' });
+  if (!c.plan) return res.status(400).json({ error: '请先由店长完成赔付方式决策' });
+  if (c.parent_confirmed) return res.status(400).json({ error: '家长已确认' });
+  const { confirmer = '' } = req.body || {};
+  if (!String(confirmer).trim()) return res.status(400).json({ error: '请填写确认家长（与儿童关系/姓名）' });
+
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE injury_cases SET parent_confirmed=1, parent_confirmer=?, parent_confirmed_at=? WHERE id=?')
+      .run(String(confirmer).trim(), nowIso(), c.id);
+    db.prepare("UPDATE staff_tasks SET status='done', done_by=?, done_at=? WHERE type='parent_confirm' AND ref_id=? AND status='open'")
+      .run(req.user.name, nowIso(), c.id);
+    addTimeline(c.event_id, 'signature', req.user,
+      `家长确认：${String(confirmer).trim()} 已确认「${INJURY_PLANS[c.plan]}」方案与伤情结论并签字（协商单 ${c.code}）`,
+      { confirmer: String(confirmer).trim() });
+  });
+  tx();
+  res.json({ ok: true });
+});
+
+// 员工复盘会：逐条标记项目动线 / 员工站位 / 家长视线盲区
+app.post('/api/injuries/:id/markers', auth, requireRole('manager'), (req, res) => {
+  const c = getInjuryCase(req.params.id);
+  if (!c) return res.status(404).json({ error: '协商单不存在' });
+  if (!c.plan) return res.status(400).json({ error: '请先完成店长赔付决策，再组织复盘' });
+  const { marker_type, content, fix_action = '' } = req.body || {};
+  if (!MARKER_TYPES[marker_type]) return res.status(400).json({ error: '标记类型须为项目动线/员工站位/家长视线盲区' });
+  if (!String(content || '').trim()) return res.status(400).json({ error: '标记内容必填' });
+
+  const info = db.prepare(`INSERT INTO staff_review_markers (injury_case_id, event_id, attraction_id, marker_type, content, fix_action, created_by_name, created_at)
+                           VALUES (?,?,?,?,?,?,?,?)`)
+    .run(c.id, c.event_id, c.attraction_id, marker_type, String(content).trim(), String(fix_action).trim(), req.user.name, nowIso());
+  addTimeline(c.event_id, 'review', req.user,
+    `复盘会标记（${c.code}）【${MARKER_TYPES[marker_type]}】${String(content).trim()}${fix_action ? `；整改：${String(fix_action).trim()}` : ''}（作为下一次巡场依据）`,
+    { marker_id: info.lastInsertRowid, marker_type });
+  res.json({ ok: true, id: info.lastInsertRowid });
+});
+
+// 完成员工复盘会：三类标记至少各一 → 项目限制开放（不再按原规则开放）+ 生成复盘巡场待办
+app.post('/api/injuries/:id/complete-review', auth, requireRole('manager'), (req, res) => {
+  const c = getInjuryCase(req.params.id);
+  if (!c) return res.status(404).json({ error: '协商单不存在' });
+  if (!c.plan) return res.status(400).json({ error: '请先完成店长赔付决策' });
+  if (c.reviewed) return res.status(400).json({ error: '员工复盘已完成' });
+  const { control_rule = '' } = req.body || {};
+  const markers = db.prepare('SELECT * FROM staff_review_markers WHERE injury_case_id=?').all(c.id);
+  const types = new Set(markers.map((m) => m.marker_type));
+  const missing = ['route', 'positioning', 'blindspot'].filter((t) => !types.has(t));
+  if (missing.length)
+    return res.status(400).json({ error: `复盘会须标记项目动线、员工站位、家长视线盲区三类，尚缺：${missing.map((t) => MARKER_TYPES[t]).join('、')}` });
+
+  const a = c.attraction_id ? db.prepare('SELECT * FROM attractions WHERE id=?').get(c.attraction_id) : null;
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE injury_cases SET reviewed=1, reviewed_by=?, reviewed_at=? WHERE id=?')
+      .run(req.user.name, nowIso(), c.id);
+    db.prepare("UPDATE staff_tasks SET status='done', done_by=?, done_at=? WHERE type='staff_review' AND ref_id=? AND status='open'")
+      .run(req.user.name, nowIso(), c.id);
+
+    // 每条盲区/动线/站位标记 → 一条复盘巡场待办（下一次巡场依据）
+    const insTask = db.prepare(`INSERT INTO staff_tasks (type, title, detail, ref_id, attraction_id, assignee_role, status, created_at)
+                                VALUES ('patrol_followup',?,?,?,?,'patrol','open',?)`);
+    for (const m of markers) {
+      insTask.run(`巡场核验：${MARKER_TYPES[m.marker_type]}—${m.content.slice(0, 24)}`,
+        `${m.fix_action ? `整改措施：${m.fix_action}；` : ''}下次巡场到 ${a ? a.name : '相关区域'} 逐项核验并登记，全部完成后由店长确认解除限制开放`,
+        m.id, c.attraction_id, nowIso());
+    }
+
+    if (a) {
+      const rule = String(control_rule).trim()
+        || `限制开放：完成 ${markers.length} 项复盘整改（动线/站位/盲区）并经店长确认前，不按原规则开放`;
+      db.prepare(`UPDATE attractions SET control_status='restricted', control_reason=?, control_rule=?, control_case_id=?, controlled_at=? WHERE id=?`)
+        .run(`受伤复盘（${c.code}）：${MARKER_TYPES[markers[0].marker_type]}等 ${markers.length} 项隐患待整改`, rule, c.id, nowIso(), a.id);
+    }
+    addTimeline(c.event_id, 'review', req.user,
+      `员工复盘会结束（${c.code}）：共 ${markers.length} 项标记已转为复盘巡场待办；${a ? `项目「${a.name}」改为限制开放（新规则），防止同类项目继续按原规则开放，待巡场整改完成后由店长解除` : '本事件未关联具体项目，隐患纳入巡场关注'}。`,
+      { marker_count: markers.length, restricted: a ? a.name : null });
+  });
+  tx();
+  res.json({ ok: true });
+});
+
+// 巡场待办：按区域聚合（下一次巡场依据）
+app.get('/api/patrol/tasks', auth, (req, res) => {
+  const { status = 'open' } = req.query;
+  const rows = db.prepare(`
+    SELECT st.*, a.name AS attraction_name, m.marker_type, m.content AS marker_content,
+           ic.code AS injury_code, ch.name AS child_name
+    FROM staff_tasks st
+    LEFT JOIN attractions a ON a.id = st.attraction_id
+    LEFT JOIN staff_review_markers m ON m.id = st.ref_id
+    LEFT JOIN injury_cases ic ON ic.id = m.injury_case_id
+    LEFT JOIN children ch ON ch.id = ic.child_id
+    WHERE st.type='patrol_followup' ${status === 'all' ? '' : 'AND st.status=?'}
+    ORDER BY st.status, st.id DESC`).all(...(status === 'all' ? [] : [status]));
+  res.json(rows);
+});
+
+// 巡场完成单条复盘待办
+app.post('/api/patrol/tasks/:id/done', auth, requireRole('patrol', 'manager'), (req, res) => {
+  const t = db.prepare("SELECT * FROM staff_tasks WHERE id=? AND type='patrol_followup'").get(req.params.id);
+  if (!t) return res.status(404).json({ error: '巡场待办不存在' });
+  if (t.status === 'done') return res.status(400).json({ error: '该待办已完成' });
+  const { note = '' } = req.body || {};
+  db.prepare("UPDATE staff_tasks SET status='done', done_by=?, done_at=?, detail=? WHERE id=?")
+    .run(req.user.name, nowIso(), note ? `${t.detail}｜核验记录：${String(note).trim()}` : t.detail, t.id);
+  // 巡场流水留痕
+  if (t.attraction_id) {
+    const a = db.prepare('SELECT name FROM attractions WHERE id=?').get(t.attraction_id);
+    db.prepare('INSERT INTO patrol_logs (area, status, note, staff_id, staff_name, created_at) VALUES (?,?,?,?,?,?)')
+      .run(a ? a.name : '全场', '需关注', `复盘巡场待办已核验：${t.title}${note ? `；${String(note).trim()}` : ''}`, req.user.id, req.user.name, nowIso());
+  }
+  res.json({ ok: true });
+});
+
+// 店长确认整改完成：全部巡场待办办结后解除限制开放，项目恢复按规则开放
+app.post('/api/injuries/:id/clear-control', auth, requireRole('manager'), (req, res) => {
+  const c = getInjuryCase(req.params.id);
+  if (!c) return res.status(404).json({ error: '协商单不存在' });
+  const a = c.attraction_id ? db.prepare('SELECT * FROM attractions WHERE id=?').get(c.attraction_id) : null;
+  if (!a) return res.status(400).json({ error: '该协商单未关联项目' });
+  if (a.control_status !== 'restricted' || a.control_case_id !== c.id)
+    return res.status(400).json({ error: '该项目当前没有来自本协商单的限制开放' });
+  const markerIds = db.prepare('SELECT id FROM staff_review_markers WHERE injury_case_id=?').all(c.id).map((x) => x.id);
+  const open = db.prepare(`SELECT COUNT(*) c FROM staff_tasks WHERE type='patrol_followup' AND status='open' AND ref_id IN (${markerIds.map(() => '?').join(',')})`).get(...markerIds).c;
+  if (open > 0) return res.status(400).json({ error: `仍有 ${open} 项复盘巡场待办未核验完成，不能解除限制开放` });
+
+  const tx = db.transaction(() => {
+    db.prepare("UPDATE attractions SET control_status='open', control_reason=NULL, control_rule=NULL, control_case_id=NULL, controlled_at=NULL WHERE id=?").run(a.id);
+    addTimeline(c.event_id, 'review', req.user,
+      `店长确认复盘整改全部完成（${c.code}）：项目「${a.name}」恢复按原规则开放，本次受伤处置闭环。`, { cleared: a.name });
+  });
+  tx();
+  res.json({ ok: true });
+});
+
 // ---------------- 店长复盘 ----------------
 app.get('/api/review', auth, requireRole('manager'), (req, res) => {
   const { from, to, attraction_id, staff } = req.query;
@@ -845,7 +1236,40 @@ app.get('/api/review', auth, requireRole('manager'), (req, res) => {
                   GROUP BY actor_name, actor_role ORDER BY c DESC`)
         .all(...events.map((e) => e.id))
     : [];
-  res.json({ events, stats: { byType, byAttraction, byHour, bySeverity, staff: staffRows } });
+
+  // 受伤赔付协商：决策分布、医药费、课时补偿
+  const injuries = db.prepare(`SELECT * FROM injury_cases WHERE event_id IN (${events.map(() => '?').join(',')})`)
+    .all(...events.map((e) => e.id));
+  const byPlan = {};
+  let medicalTotal = 0, classTotal = 0, confirmedCount = 0;
+  for (const ic of injuries) {
+    if (ic.plan) byPlan[INJURY_PLANS[ic.plan]] = (byPlan[INJURY_PLANS[ic.plan]] || 0) + 1;
+    medicalTotal += ic.medical_fee || 0;
+    classTotal += ic.class_sessions || 0;
+    if (ic.parent_confirmed) confirmedCount += 1;
+  }
+  // 复盘会标记（动线/站位/盲区），作为下一次巡场依据
+  const markers = db.prepare(`
+    SELECT m.*, ic.code AS injury_code, a.name AS attraction_name FROM staff_review_markers m
+    LEFT JOIN injury_cases ic ON ic.id = m.injury_case_id
+    LEFT JOIN attractions a ON a.id = m.attraction_id
+    WHERE m.event_id IN (${events.map(() => '?').join(',')})
+    ORDER BY m.id DESC`).all(...events.map((e) => e.id));
+  const byMarker = {};
+  for (const m of markers) byMarker[MARKER_TYPES[m.marker_type]] = (byMarker[MARKER_TYPES[m.marker_type]] || 0) + 1;
+
+  res.json({
+    events,
+    stats: { byType, byAttraction, byHour, bySeverity, staff: staffRows },
+    injury: {
+      total: injuries.length,
+      decided: injuries.filter((i) => i.plan).length,
+      confirmed: confirmedCount,
+      reviewed: injuries.filter((i) => i.reviewed).length,
+      byPlan, medical_total: medicalTotal, class_total: classTotal,
+    },
+    markers: { list: markers, byType: byMarker },
+  });
 });
 
 // ---------------- 生日会 / 托管班 ----------------

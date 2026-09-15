@@ -24,6 +24,9 @@ export interface Attraction {
   id: number; key: string; name: string;
   min_height: number | null; max_height: number | null;
   capacity: number; status: string; is_facility: number;
+  /** 受伤复盘限制开放（不按原规则开放） */
+  control_status?: string; control_reason?: string | null;
+  control_rule?: string | null; control_case_id?: number | null;
 }
 
 export interface Checkin {
@@ -141,6 +144,9 @@ export interface Overview {
   attractions: Attraction[]; occupancy: Record<string, number>;
   open_events: number; processing_events: number;
   today_parties: Party[]; active_checkins: Checkin[]; recent_patrol: PatrolLog[];
+  restricted_attractions?: { id: number; name: string; control_reason: string | null; control_rule: string | null }[];
+  pending_injury_count?: number;
+  open_patrol_task_count?: number;
 }
 
 export interface RecommendResult {
@@ -154,6 +160,10 @@ export interface EventDetail {
   child: Child | null; member: Member | null;
   guardians: Guardian[]; parties: Party[];
   search_task: SearchTask | null; found_report: FoundReport | null;
+  injury_case: {
+    id: number; code: string; plan: string | null; plan_label: string | null;
+    parent_confirmed: number; reviewed: number;
+  } | null;
 }
 
 export interface ArchiveData {
@@ -174,4 +184,63 @@ export interface ReviewResult {
     byHour: Record<string, number>; bySeverity: Record<string, number>;
     staff: { actor_name: string; actor_role: string; c: number }[];
   };
+  injury?: {
+    total: number; decided: number; confirmed: number; reviewed: number;
+    byPlan: Record<string, number>; medical_total: number; class_total: number;
+  };
+  markers?: {
+    list: ReviewMarker[];
+    byType: Record<string, number>;
+  };
+}
+
+// ---------- 受伤赔付协商 ----------
+export interface InjuryCase {
+  id: number; code: string; event_id: number;
+  child_id: number | null; member_id: number | null; attraction_id: number | null;
+  injury_type: string;
+  play_item: string; action_desc: string; companion_position: string; first_aid: string; parent_demands: string;
+  plan: string | null; plan_detail: string; medical_fee: number; class_sessions: number; benefit_applied: number;
+  decided_by: string | null; decided_at: string | null;
+  parent_confirmed: number; parent_confirmer: string | null; parent_confirmed_at: string | null;
+  reviewed: number; reviewed_by: string | null; reviewed_at: string | null;
+  created_by_name: string; created_at: string;
+  // 列表/详情附带
+  event_code?: string; event_status?: string; event_type?: string;
+  child_name?: string | null; card_no?: string; card_type?: string;
+  remaining_sessions?: number; card_benefits?: string;
+  attraction_name?: string | null; control_status?: string; control_rule?: string | null;
+  plan_label?: string | null;
+  open_parent_task?: number; open_review_task?: number;
+  markers?: ReviewMarker[];
+  tasks?: StaffTask[];
+  patrol_tasks?: (PatrolTask & { marker_type: string })[];
+}
+
+export interface InjuryDetail {
+  injury_case: InjuryCase;
+  plan_options: Record<string, string>;
+  marker_types: Record<string, string>;
+}
+
+export interface ReviewMarker {
+  id: number; injury_case_id: number; event_id: number; attraction_id: number | null;
+  marker_type: string; content: string; fix_action: string;
+  created_by_name: string; created_at: string;
+  injury_code?: string; attraction_name?: string | null;
+}
+
+export interface StaffTask {
+  id: number; type: string; title: string; detail: string;
+  ref_id: number | null; attraction_id: number | null;
+  assignee_role: string; status: string; done_by: string | null; done_at: string | null;
+  created_at: string;
+}
+
+export interface PatrolTask extends StaffTask {
+  attraction_name?: string | null;
+  marker_type?: string;
+  marker_content?: string;
+  injury_code?: string;
+  child_name?: string | null;
 }
